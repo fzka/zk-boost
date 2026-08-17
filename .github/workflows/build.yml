@@ -31,29 +31,53 @@ jobs:
       - name: Compilar executável
         shell: pwsh
         run: |
+          # --onedir (e nao --onefile): o executavel nao se auto-extrai em
+          # tempo de execucao, o que abre instantaneamente e reduz muito o
+          # falso positivo de antivirus.
           $pyArgs = @(
             '--noconfirm',
-            '--onefile',
+            '--onedir',
             '--windowed',
-            '--uac-admin',              # pede elevação de Administrador ao abrir
+            '--uac-admin',
             '--name', 'ZK-Boost',
-            '--collect-all', 'customtkinter'
+            '--version-file', 'version_info.txt',
+            '--collect-all', 'customtkinter',
+            '--hidden-import', 'zk_diagnostics'
           )
           if (Test-Path 'assets/icon.ico') {
             $pyArgs += @('--icon', 'assets/icon.ico')
           }
           pyinstaller @pyArgs zk_boost.py
 
+      - name: Verificar metadados do executável
+        shell: pwsh
+        run: |
+          $exe = Get-Item 'dist/ZK-Boost/ZK-Boost.exe'
+          $info = $exe.VersionInfo
+          Write-Output "ProductName : $($info.ProductName)"
+          Write-Output "FileVersion : $($info.FileVersion)"
+          Write-Output "Company     : $($info.CompanyName)"
+          if (-not $info.ProductName) {
+            throw "Metadados de versao ausentes no executavel."
+          }
+
+      - name: Empacotar release
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'dist/ZK-Boost/*' -DestinationPath 'ZK-Boost-windows.zip' -Force
+          $size = (Get-Item 'ZK-Boost-windows.zip').Length / 1MB
+          Write-Output ("Pacote final: {0:N1} MB" -f $size)
+
       - name: Publicar artefato
         uses: actions/upload-artifact@v4
         with:
           name: ZK-Boost-windows
-          path: dist/ZK-Boost.exe
+          path: ZK-Boost-windows.zip
           retention-days: 30
 
       - name: Criar Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ZK-Boost.exe
+          files: ZK-Boost-windows.zip
           generate_release_notes: true

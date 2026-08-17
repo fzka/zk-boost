@@ -4,7 +4,7 @@
 
 **Otimizador de performance para Counter-Strike 2 — 100% VAC-Safe**
 
-[![Build Windows](https://github.com/fzka/zk-boost/actions/workflows/build.yml/badge.svg)](https://github.com/fzka/zk-boost/actions/workflows/build.yml)
+[![Build Windows](https://github.com/SEU-USUARIO/zk-boost/actions/workflows/build.yml/badge.svg)](https://github.com/SEU-USUARIO/zk-boost/actions/workflows/build.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -49,11 +49,42 @@ Todas as alterações são reversíveis pelo botão **RESTAURAR PADRÕES**.
 
 ## Instalação
 
-Baixe o `ZK-Boost.exe` mais recente em [Releases](../../releases) e execute
-**como Administrador** (ajustes de CPU e energia exigem elevação).
+1. Baixe o `ZK-Boost-windows.zip` mais recente em [Releases](../../releases)
+2. Extraia a pasta inteira em qualquer lugar (ex.: `C:\ZK-Boost`)
+3. Execute o `ZK-Boost.exe` — ele pedirá elevação de Administrador, necessária
+   para os ajustes de CPU e energia
 
-> O executável é gerado automaticamente pelo GitHub Actions a partir deste
-> código-fonte. Você pode auditar cada build na aba Actions.
+---
+
+### ⚠️ "O Windows protegeu o seu computador"
+
+**Esse aviso vai aparecer. Ele não indica vírus.**
+
+O SmartScreen do Windows bloqueia por *reputação*, não por análise de conteúdo.
+Todo executável novo, sem certificado de assinatura digital paga, começa com
+reputação zero — e o ZK Boost ainda por cima pede elevação e ajusta prioridade
+de processos, comportamento que o classificador trata com desconfiança por
+padrão.
+
+Para executar: clique em **Mais informações** → **Executar assim mesmo**.
+
+**Por que você pode confiar (e verificar):**
+
+- O código-fonte inteiro está neste repositório — nada é ofuscado
+- O `.exe` é compilado publicamente pelo GitHub Actions, não na máquina de
+  ninguém. [Veja os builds](../../actions): cada um mostra exatamente qual
+  commit gerou qual binário
+- Nada é enviado pela rede. O app não tem telemetria, não faz login e não se
+  conecta a servidor nenhum
+- Todas as alterações são reversíveis pelo botão **RESTAURAR PADRÕES**
+
+Se preferir não confiar no binário, [rode do código-fonte](#desenvolvimento) —
+são três comandos.
+
+Assinatura digital custa entre US$ 200 e 600 por ano. Enquanto o projeto não
+tiver tamanho que justifique, o aviso continuará aparecendo. Preferimos ser
+transparentes sobre isso a pedir que você desative seu antivírus — **nunca
+faça isso por conta de nenhum programa, incluindo este.**
 
 ---
 
@@ -62,7 +93,7 @@ Baixe o `ZK-Boost.exe` mais recente em [Releases](../../releases) e execute
 ### Rodando do código-fonte (Windows)
 
 ```bash
-git clone https://github.com/fzka/zk-boost.git
+git clone https://github.com/SEU-USUARIO/zk-boost.git
 cd zk-boost
 python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
