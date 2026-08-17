@@ -6,7 +6,7 @@ Otimizador VAC-Safe para Counter-Strike 2.
 
 Métodos utilizados (nenhum deles toca a memória do jogo):
   - psutil  -> CPU Affinity / Priority Class do processo cs2.exe
-  - I/O     -> injeção não-destrutiva de arquivos .cfg
+  - I/O     -> escrita não-destrutiva de arquivos .cfg
   - powercfg / ipconfig / netsh -> comandos nativos do Windows
 
 Build:
@@ -357,7 +357,7 @@ class ZKBoostApp(ctk.CTk):
         ).pack(side="left")
 
         self.btn_boost = ctk.CTkButton(
-            footer, text="INJETAR BOOST", height=45, corner_radius=8,
+            footer, text="APLICAR BOOST", height=45, corner_radius=8,
             font=ctk.CTkFont(size=15, weight="bold"), command=self.apply_optimizations,
         )
         self.btn_boost.grid(row=1, column=0, sticky="ew", padx=(0, 5))
@@ -479,7 +479,7 @@ class ZKBoostApp(ctk.CTk):
             ]
         return lines
 
-    def apply_cfg_injection(self, restore=False) -> bool:
+    def apply_game_config(self, restore=False) -> bool:
         """Escreve zk_boost.cfg e registra o exec no autoexec.cfg sem apagar nada."""
         try:
             cfg_file = os.path.join(self.cs2_cfg_path, "zk_boost.cfg")
@@ -708,11 +708,11 @@ class ZKBoostApp(ctk.CTk):
         try:
             # 1. CFG do jogo
             if self.cs2_cfg_path and (self.var_tracers.get() or self.var_subtick.get()):
-                if self.apply_cfg_injection(restore=False):
-                    report.append("✔️ CFG injetada no jogo (binds protegidos)")
-                    self.log("✔️ CFG injetada com sucesso.")
+                if self.apply_game_config(restore=False):
+                    report.append("✔️ CFG aplicada no jogo (binds preservados)")
+                    self.log("✔️ CFG aplicada com sucesso.")
                 else:
-                    report.append("❌ Falha ao injetar a CFG")
+                    report.append("❌ Falha ao aplicar a CFG")
 
             # 2. CPU
             report.extend(self._tune_process(restore=False))
@@ -744,7 +744,7 @@ class ZKBoostApp(ctk.CTk):
             report.append(f"❌ Erro inesperado: {exc}")
 
         self.log("--- BOOST finalizado ---")
-        self.after(0, self._finish, "ZK BOOST", ["Relatório de Injeção:", ""] + report)
+        self.after(0, self._finish, "ZK BOOST", ["Relatório de Otimização:", ""] + report)
 
     # ------------------------------------------------------------------ #
     # AÇÃO: RESTAURAR
@@ -774,7 +774,7 @@ class ZKBoostApp(ctk.CTk):
         try:
             # 1. CFG padrão
             if self.cs2_cfg_path and os.path.isdir(self.cs2_cfg_path):
-                if self.apply_cfg_injection(restore=True):
+                if self.apply_game_config(restore=True):
                     report.append("✔️ CFG restaurada (rastros habilitados)")
                     report.append("ℹ️ Reinicie o CS2 para os valores padrão valerem")
                     self.log("✔️ zk_boost.cfg reescrito com os valores padrão.")

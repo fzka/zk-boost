@@ -42,7 +42,7 @@ Todas as alterações são reversíveis pelo botão **RESTAURAR PADRÕES**.
 - **Otimização de rede** — flush de DNS e, opcionalmente, reset de Winsock/TCP-IP
 - **Limpeza de temporários** com relatório de espaço liberado
 - **CFG integrada** — rastros de tiro em 1ª pessoa e suavização de sub-ticks
-- **Injeção não-destrutiva** — o `autoexec.cfg` é apenas complementado, nunca sobrescrito
+- **Escrita não-destrutiva** — o `autoexec.cfg` é apenas complementado, nunca sobrescrito
 - **Reversão completa** de tudo com um clique
 
 ---
