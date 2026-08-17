@@ -26,6 +26,7 @@ import customtkinter as ctk
 import psutil
 
 import zk_diagnostics as diag
+from zk_ui_diagnostics import DiagnosticsPanel
 
 # --------------------------------------------------------------------------- #
 # CONSTANTES
@@ -227,8 +228,8 @@ class ZKBoostApp(ctk.CTk):
         super().__init__()
 
         self.title(f"ZK Boost v{APP_VERSION} - CS2 Optimizer")
-        self.geometry("520x780")
-        self.minsize(480, 620)
+        self.geometry("540x820")
+        self.minsize(500, 680)
         self.resizable(True, True)
 
         self.busy = False
@@ -338,10 +339,25 @@ class ZKBoostApp(ctk.CTk):
         if not self.is_admin:
             self._build_admin_banner(header)
 
-        # ---------- Área rolável ----------
-        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        body.grid(row=1, column=0, sticky="nsew", padx=25, pady=5)
-        body.grid_columnconfigure(0, weight=1)
+        # ---------- Abas ----------
+        # Diagnóstico vem primeiro de propósito: o app mostra que entende a
+        # máquina do usuário antes de pedir permissão para alterá-la.
+        self.tabs = ctk.CTkTabview(self, fg_color=COLOR_BG_CARD, corner_radius=8)
+        self.tabs.grid(row=1, column=0, sticky="nsew", padx=25, pady=5)
+
+        tab_diag = self.tabs.add("Diagnóstico")
+        tab_opts = self.tabs.add("Otimizações")
+        self.tabs.set("Diagnóstico")
+
+        # --- Aba 1: Diagnóstico ---
+        tab_diag.grid_columnconfigure(0, weight=1)
+        tab_diag.grid_rowconfigure(0, weight=1)
+        self.diagnostics_panel = DiagnosticsPanel(tab_diag, on_log=self.log)
+        self.diagnostics_panel.grid(row=0, column=0, sticky="nsew")
+
+        # --- Aba 2: Otimizações ---
+        body = ctk.CTkScrollableFrame(tab_opts, fg_color="transparent")
+        body.pack(fill="both", expand=True)
 
         # Sistema
         self._section_title(body, "⚙️ Otimizações de Sistema")
@@ -350,22 +366,27 @@ class ZKBoostApp(ctk.CTk):
         self._switch(frame_sys, "Forçar Alta Prioridade de Processamento", self.var_priority)
         self._switch(frame_sys, "Ativar Plano de Energia Máxima", self.var_power)
 
-        # Manutenção
-        self._section_title(body, "🧹 Manutenção do Windows")
-        frame_maint = self._card(body)
-        self._switch(frame_maint, "Limpar Cache DNS", self.var_network)
-        self._switch(frame_maint, "Limpar Cache e Arquivos Temporários", self.var_cleanup)
-
         # Jogo
         self._section_title(body, "🎮 Otimizações de Jogo (CFG Integrada)")
         frame_game = self._card(body)
         self._switch(frame_game, "Desabilitar Rastros de Tiro (1ª Pessoa)", self.var_tracers)
         self._switch(frame_game, "Suavização Avançada de Sub-Ticks", self.var_subtick)
 
+        # Manutenção — separada das otimizações porque NÃO afeta desempenho
+        # em jogo. Misturar as duas coisas sugere um ganho que não existe.
+        self._section_title(body, "🧹 Manutenção do Windows")
+        ctk.CTkLabel(
+            body, text="Higiene do sistema. Não influencia o FPS.",
+            font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+        frame_maint = self._card(body)
+        self._switch(frame_maint, "Limpar Cache DNS", self.var_network)
+        self._switch(frame_maint, "Limpar Arquivos Temporários", self.var_cleanup)
+
         # Console de log
         self._section_title(body, "📋 Console")
         self.log_box = ctk.CTkTextbox(
-            body, height=130, fg_color=COLOR_BG_CARD, corner_radius=8,
+            body, height=120, fg_color="#1a1a1a", corner_radius=8,
             font=ctk.CTkFont(family="Consolas", size=11), state="disabled", wrap="word",
         )
         self.log_box.pack(fill="both", expand=True, pady=(0, 5))
@@ -644,7 +665,12 @@ class ZKBoostApp(ctk.CTk):
                 skipped += 1  # arquivo em uso: ignorar é o comportamento seguro
 
         mb = freed / (1024 * 1024)
-        self.log(f"✔️ Temp: {removed} itens removidos ({mb:.1f} MB), {skipped} em uso.")
+        # Arquivos em uso sao pulados de proposito. Exibir esse numero como
+        # se fosse falha assusta sem motivo: e o comportamento correto.
+        if removed:
+            self.log(f"✔️ Temp: {removed} itens removidos ({mb:.1f} MB liberados).")
+        else:
+            self.log("✔️ Temp: nada a remover, a pasta ja estava limpa.")
         return mb
 
     @staticmethod
@@ -793,10 +819,12 @@ class ZKBoostApp(ctk.CTk):
             # 5. Limpeza
             if self.var_cleanup.get():
                 freed = self.clean_temp_files()
-                if freed is not None:
-                    report.append(f"✔️ Temporários limpos ({freed:.1f} MB liberados)")
-                else:
+                if freed is None:
                     report.append("❌ Falha na limpeza de temporários")
+                elif freed < 1:
+                    report.append("✔️ Temporários já estavam limpos")
+                else:
+                    report.append(f"✔️ Temporários limpos ({freed:.0f} MB liberados)")
 
         except Exception as exc:  # rede de segurança: a GUI nunca deve travar
             self.log(f"❌ Erro inesperado: {exc}")
