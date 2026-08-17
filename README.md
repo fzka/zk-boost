@@ -39,7 +39,7 @@ Todas as alterações são reversíveis pelo botão **RESTAURAR PADRÕES**.
 - **Isolamento do Core 0** — remove o núcleo que o Windows mais usa para interrupções
 - **Alta prioridade de processamento** para o `cs2.exe`
 - **Plano de energia máximo** (Ultimate Performance, com fallback para Alto Desempenho)
-- **Otimização de rede** — flush de DNS e, opcionalmente, reset de Winsock/TCP-IP
+- **Limpeza de cache DNS** — manutenção, sem exigir reinício do PC
 - **Limpeza de temporários** com relatório de espaço liberado
 - **CFG integrada** — rastros de tiro em 1ª pessoa e suavização de sub-ticks
 - **Escrita não-destrutiva** — o `autoexec.cfg` é apenas complementado, nunca sobrescrito

@@ -56,6 +56,7 @@ COLOR_BG_CARD = "#212121"
 COLOR_ACCENT = "#00a8ff"
 COLOR_DANGER = "#8b3a3a"
 COLOR_DANGER_HOVER = "#a94545"
+COLOR_BANNER = "#3d3320"
 
 
 # --------------------------------------------------------------------------- #
@@ -79,6 +80,32 @@ CONFIG_FILE = os.path.join(get_config_dir(), "zk_settings.json")
 def is_admin() -> bool:
     try:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_as_admin() -> bool:
+    """Reabre o próprio app pedindo elevação via UAC.
+
+    Funciona tanto rodando do código-fonte (python zk_boost.py) quanto
+    empacotado pelo PyInstaller. Retorna True se o Windows aceitou iniciar o
+    novo processo — o chamador deve então encerrar a instância atual.
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        if getattr(sys, "frozen", False):
+            executable = sys.executable
+            params = ""
+        else:
+            executable = sys.executable
+            params = f'"{os.path.abspath(sys.argv[0])}"'
+
+        # Códigos <= 32 indicam falha, incluindo o usuário recusando o UAC.
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", executable, params, None, 1
+        )
+        return int(result) > 32
     except Exception:
         return False
 
@@ -205,6 +232,7 @@ class ZKBoostApp(ctk.CTk):
         self.resizable(True, True)
 
         self.busy = False
+        self.is_admin = is_admin()
 
         # --- Variáveis de Sistema ---
         self.var_affinity = ctk.BooleanVar(value=True)
@@ -232,8 +260,8 @@ class ZKBoostApp(ctk.CTk):
             self.log(f"Pasta CFG detectada: {self.cs2_cfg_path}")
         else:
             self.log("Pasta CFG do CS2 ainda não definida.")
-        if not is_admin():
-            self.log("Sem privilégios de administrador — CPU/Energia podem falhar.")
+        if not self.is_admin:
+            self.log("Sem privilégios de Administrador — alguns ajustes serão ignorados.")
 
     # ------------------------------------------------------------------ #
     # PERSISTÊNCIA
@@ -307,6 +335,9 @@ class ZKBoostApp(ctk.CTk):
             text_color="gray", font=ctk.CTkFont(size=12),
         ).pack()
 
+        if not self.is_admin:
+            self._build_admin_banner(header)
+
         # ---------- Área rolável ----------
         body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.grid(row=1, column=0, sticky="nsew", padx=25, pady=5)
@@ -322,7 +353,7 @@ class ZKBoostApp(ctk.CTk):
         # Manutenção
         self._section_title(body, "🧹 Manutenção do Windows")
         frame_maint = self._card(body)
-        self._switch(frame_maint, "Otimizar Rede (Flush DNS e Winsock)", self.var_network)
+        self._switch(frame_maint, "Limpar Cache DNS", self.var_network)
         self._switch(frame_maint, "Limpar Cache e Arquivos Temporários", self.var_cleanup)
 
         # Jogo
@@ -368,6 +399,47 @@ class ZKBoostApp(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"), command=self.restore_defaults,
         )
         self.btn_restore.grid(row=1, column=1, sticky="ew", padx=(5, 0))
+
+    def _build_admin_banner(self, parent):
+        """Aviso fixo quando o app roda sem elevação.
+
+        Sem isso, os ajustes que exigem Administrador falham e o usuário lê
+        apenas um ❌ no relatório, sem saber que a causa é permissão.
+        """
+        banner = ctk.CTkFrame(parent, fg_color=COLOR_BANNER, corner_radius=8)
+        banner.pack(fill="x", padx=25, pady=(12, 0))
+
+        ctk.CTkLabel(
+            banner, text="⚠  Executando sem privilégios de Administrador",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffd166",
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+
+        ctk.CTkLabel(
+            banner,
+            text="Ajustes de CPU, energia e rede serão ignorados.",
+            font=ctk.CTkFont(size=11), text_color="#d9c9a3",
+            justify="left", anchor="w",
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        ctk.CTkButton(
+            banner, text="Reiniciar como Administrador", height=30,
+            font=ctk.CTkFont(size=12), corner_radius=6,
+            fg_color="#8a6d2f", hover_color="#a3823b",
+            command=self.restart_elevated,
+        ).pack(fill="x", padx=12, pady=(0, 10))
+
+    def restart_elevated(self):
+        """Fecha esta instância e reabre com elevação."""
+        self.save_settings()
+        if relaunch_as_admin():
+            self.destroy()
+        else:
+            messagebox.showwarning(
+                "Elevação recusada",
+                "Não foi possível reiniciar como Administrador.\n\n"
+                "Feche o ZK Boost e abra novamente clicando com o botão direito "
+                "no executável → 'Executar como administrador'.",
+            )
 
     def _section_title(self, parent, text):
         ctk.CTkLabel(
@@ -513,23 +585,24 @@ class ZKBoostApp(ctk.CTk):
     # MÓDULO: REDE
     # ------------------------------------------------------------------ #
 
-    def optimize_network(self, deep=False):
-        results = []
+    def optimize_network(self):
+        """Limpeza de cache DNS. É manutenção, não ganho de desempenho.
+
+        Deliberadamente NÃO fazemos `netsh winsock reset` nem `netsh int ip
+        reset` aqui: são comandos de REPARO de uma pilha de rede corrompida,
+        exigem reinício do PC e não melhoram nada em partida. Quem abre um
+        otimizador quer jogar em seguida, não reiniciar.
+
+        Também não aplicamos tweaks de TCP (Nagle, TcpAckFrequency): o CS2
+        trafega em UDP, então esses ajustes não tocam no jogo — são placebo
+        repetido por guias de otimização.
+        """
+        lines = []
         ok, _ = run_hidden("ipconfig /flushdns")
-        results.append(("Cache DNS limpo", ok))
-
-        ok, _ = run_hidden("ipconfig /registerdns")
-        results.append(("DNS registrado novamente", ok))
-
-        if deep:
-            ok, _ = run_hidden("netsh winsock reset")
-            results.append(("Winsock resetado (requer reinício)", ok))
-            ok, _ = run_hidden("netsh int ip reset")
-            results.append(("Pilha TCP/IP resetada (requer reinício)", ok))
-
-        for label, success in results:
-            self.log(f"{'✔️' if success else '❌'} {label}")
-        return any(success for _, success in results)
+        prefix = "✔️ " if ok else "❌ "
+        lines.append(prefix + "Cache DNS limpo")
+        self.log(prefix + "Cache DNS limpo")
+        return lines
 
     # ------------------------------------------------------------------ #
     # MÓDULO: LIMPEZA DE TEMP
@@ -680,15 +753,6 @@ class ZKBoostApp(ctk.CTk):
             messagebox.showwarning("Aviso", "Pasta do CS2 não definida. CFG não aplicada.")
             return
 
-        deep_network = False
-        if self.var_network.get():
-            deep_network = messagebox.askyesno(
-                "Otimização de Rede",
-                "Aplicar também o reset profundo (Winsock + TCP/IP)?\n\n"
-                "Isso exige reiniciar o PC e pode desconectar VPNs.\n"
-                "Escolha 'Não' para apenas limpar o cache DNS.",
-            )
-
         if self.var_cleanup.get():
             confirm = messagebox.askyesno(
                 "Limpeza de Temporários",
@@ -701,9 +765,9 @@ class ZKBoostApp(ctk.CTk):
         self.save_settings()
         self._set_busy(True)
         self.log("--- Iniciando BOOST ---")
-        threading.Thread(target=self._run_apply, args=(deep_network,), daemon=True).start()
+        threading.Thread(target=self._run_apply, daemon=True).start()
 
-    def _run_apply(self, deep_network):
+    def _run_apply(self):
         report = []
         try:
             # 1. CFG do jogo
@@ -724,12 +788,7 @@ class ZKBoostApp(ctk.CTk):
 
             # 4. Rede
             if self.var_network.get():
-                if self.optimize_network(deep=deep_network):
-                    report.append("✔️ Rede otimizada (DNS limpo)")
-                    if deep_network:
-                        report.append("⚠️ Reinicie o PC para concluir o reset de rede")
-                else:
-                    report.append("❌ Falha ao otimizar a rede")
+                report.extend(self.optimize_network())
 
             # 5. Limpeza
             if self.var_cleanup.get():
