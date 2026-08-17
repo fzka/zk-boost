@@ -35,6 +35,14 @@ STATUS_ERROR = "ERROR"
 # Idade do driver de vídeo a partir da qual sugerimos atualização.
 DRIVER_AGE_WARN_DAYS = 120
 
+# Processos que representam CPU ociosa, não consumo real. O nome muda com o
+# idioma do Windows, por isso a lista cobre as variantes mais comuns.
+IDLE_PROCESS_NAMES = {
+    "system idle process",
+    "processo ocioso do sistema",
+    "idle",
+}
+
 
 @dataclass
 class Finding:
@@ -472,11 +480,21 @@ def check_background_load():
 
         cores = psutil.cpu_count() or 1
         loads = []
-        for proc in psutil.process_iter(["name"]):
+        for proc in psutil.process_iter(["name", "pid"]):
             try:
+                pid = proc.info.get("pid")
+                name = proc.info.get("name") or "?"
+
+                # O "System Idle Process" (PID 0) contabiliza a CPU OCIOSA.
+                # Incluí-lo inverte a leitura: 98% nele significa 98% de CPU
+                # LIVRE, e o diagnóstico acabaria acusando sobrecarga num PC
+                # que está parado.
+                if pid == 0 or name.lower() in IDLE_PROCESS_NAMES:
+                    continue
+
                 usage = proc.cpu_percent(None) / cores
                 if usage > 0.5:
-                    loads.append((proc.info.get("name") or "?", usage))
+                    loads.append((name, usage))
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
@@ -496,14 +514,17 @@ def check_background_load():
         finding.detail = "Maiores consumidores: " + ", ".join(
             f"{name} ({usage:.1f}%)" for name, usage in top
         )
-    if total > 15:
+
+    # Com o processo ocioso fora da conta, um PC em repouso fica na casa de
+    # 1-5%. Acima de 10% já há algo competindo por CPU com o jogo.
+    if total > 10:
         finding.status = STATUS_WARN
         finding.recommendation = (
             "Fechar esses programas antes da partida libera CPU para o CS2."
         )
     else:
         finding.status = STATUS_OK
-        finding.detail = finding.detail or "Sistema ocioso."
+        finding.detail = finding.detail or "Sistema ocioso, sem concorrência pela CPU."
 
     return finding
 
