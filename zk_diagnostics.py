@@ -296,8 +296,12 @@ def list_power_plans():
     return plans
 
 
-def _min_processor_state(guid):
-    """Estado mínimo do processador (%) do plano, em modo CA."""
+def min_processor_state(guid):
+    """Estado mínimo do processador (%) do plano, em modo CA.
+
+    É esta métrica — e não o nome do plano — que diz se a CPU pode reduzir
+    frequência durante a partida. Funciona em qualquer idioma do Windows.
+    """
     ok, output = _run(f"powercfg /query {guid} SUB_PROCESSOR PROCTHROTTLEMIN")
     if not ok:
         return None
@@ -321,7 +325,7 @@ def check_power_plan():
         return Finding("power", "Plano de Energia", status=STATUS_ERROR,
                        detail="Nenhum plano ativo identificado.")
 
-    min_state = _min_processor_state(active["guid"])
+    min_state = min_processor_state(active["guid"])
     finding = Finding(
         "power", "Plano de Energia",
         value=active["name"] or active["guid"],

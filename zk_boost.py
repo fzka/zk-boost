@@ -25,6 +25,8 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 import psutil
 
+import zk_diagnostics as diag
+
 # --------------------------------------------------------------------------- #
 # CONSTANTES
 # --------------------------------------------------------------------------- #
@@ -32,11 +34,15 @@ import psutil
 IS_WINDOWS = os.name == "nt"
 APP_VERSION = "2.0"
 
-POWER_PLANS = {
-    "ultimate": "e9a42b02-d5df-448d-aa00-03f14749eb61",  # Ultimate Performance
-    "high": "8c5e7fda-e8bf-4a96-9a14-5e74aca02f77",      # Alto Desempenho
-    "balanced": "381b4222-f694-41f0-9685-ff5bb260df2e",  # Equilibrado (padrão)
-}
+# ATENÇÃO: os GUIDs de plano de energia NÃO são iguais entre máquinas.
+# Planos duplicados pela BIOS, por utilitários do fabricante ou por
+# `powercfg -duplicatescheme` recebem GUID próprio — hardcodar o GUID do
+# "Alto Desempenho" faz o recurso falhar silenciosamente em boa parte dos PCs.
+# Os planos são descobertos em runtime via zk_diagnostics.list_power_plans().
+#
+# Único GUID estável em todas as instalações: o Equilibrado padrão do Windows,
+# usado apenas como último recurso na restauração.
+GUID_BALANCED = "381b4222-f694-41f0-9685-ff5bb260df2e"
 
 MARKER_START = "// >>> ZK BOOST START"
 MARKER_END = "// <<< ZK BOOST END"
@@ -215,6 +221,7 @@ class ZKBoostApp(ctk.CTk):
         self.var_terms = ctk.BooleanVar(value=False)
 
         self.cs2_cfg_path = None
+        self.previous_power_guid = None
         self.load_settings()
 
         self.build_ui()
@@ -251,6 +258,10 @@ class ZKBoostApp(ctk.CTk):
         else:
             self.cs2_cfg_path = detect_cs2_cfg_path()
 
+        # Sobrevive ao fechamento do app: sem isso, quem desse boost e
+        # reiniciasse perderia a referência do plano de energia original.
+        self.previous_power_guid = data.get("previous_power_guid") or None
+
     def _settings_map(self):
         return {
             "affinity": self.var_affinity,
@@ -265,6 +276,7 @@ class ZKBoostApp(ctk.CTk):
     def save_settings(self):
         data = {key: var.get() for key, var in self._settings_map().items()}
         data["cs2_cfg_path"] = self.cs2_cfg_path or ""
+        data["previous_power_guid"] = self.previous_power_guid or ""
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, indent=2)
@@ -577,12 +589,81 @@ class ZKBoostApp(ctk.CTk):
     # MÓDULO: ENERGIA
     # ------------------------------------------------------------------ #
 
-    def set_power_plan(self, mode):
-        guid = POWER_PLANS[mode]
-        ok, _ = run_hidden(f"powercfg /setactive {guid}")
-        if not ok and mode == "ultimate":
-            ok, _ = run_hidden(f"powercfg /setactive {POWER_PLANS['high']}")
-        return ok
+    def _rank_power_plans(self):
+        """Lista os planos disponíveis ordenados por potencial de desempenho.
+
+        O critério é o estado mínimo do processador (PROCTHROTTLEMIN): quanto
+        maior, menos a CPU reduz frequência durante a partida. Isso evita
+        depender do nome do plano, que muda conforme o idioma do Windows.
+        """
+        plans = diag.list_power_plans()
+        ranked = []
+        for plan in plans:
+            state = diag.min_processor_state(plan["guid"])
+            ranked.append({**plan, "min_state": state if state is not None else -1})
+        ranked.sort(key=lambda item: item["min_state"], reverse=True)
+        return ranked
+
+    def apply_power_plan(self):
+        """Ativa o plano de maior desempenho disponível nesta máquina."""
+        ranked = self._rank_power_plans()
+        if not ranked:
+            self.log("❌ Não foi possível listar os planos de energia.")
+            return False, "Não foi possível listar os planos de energia"
+
+        active = next((p for p in ranked if p["active"]), None)
+        if active:
+            # Guarda o plano do usuário para que a restauração devolva
+            # exatamente o que ele tinha, e não um padrão genérico.
+            self.previous_power_guid = active["guid"]
+            self.save_settings()
+
+        best = ranked[0]
+        if active and best["guid"] == active["guid"]:
+            self.log(f"✔️ Plano de energia já ideal: {best['name']}.")
+            return True, f"Plano de energia já ideal ({best['name']})"
+
+        ok, _ = run_hidden(f"powercfg /setactive {best['guid']}")
+        if ok:
+            self.log(f"✔️ Plano de energia alterado para {best['name']}.")
+            return True, f"Plano de energia: {best['name']}"
+
+        self.log("❌ Falha ao alterar o plano de energia.")
+        return False, "Falha ao alterar o plano de energia"
+
+    def restore_power_plan(self):
+        """Devolve o plano que estava ativo antes do boost."""
+        plans = diag.list_power_plans()
+        if not plans:
+            return False, "Não foi possível listar os planos de energia"
+
+        available = {plan["guid"]: plan for plan in plans}
+        target = None
+
+        if self.previous_power_guid and self.previous_power_guid in available:
+            target = available[self.previous_power_guid]
+        elif GUID_BALANCED in available:
+            target = available[GUID_BALANCED]
+        else:
+            # Sem histórico e sem o Equilibrado padrão: usa o plano de menor
+            # estado mínimo de processador, que é o mais conservador presente.
+            ranked = self._rank_power_plans()
+            target = ranked[-1] if ranked else None
+
+        if not target:
+            return False, "Nenhum plano de energia adequado encontrado"
+
+        if target["active"]:
+            return True, f"Plano de energia já em {target['name']}"
+
+        ok, _ = run_hidden(f"powercfg /setactive {target['guid']}")
+        if ok:
+            self.previous_power_guid = None
+            self.save_settings()
+            self.log(f"✔️ Plano de energia restaurado para {target['name']}.")
+            return True, f"Plano de energia restaurado ({target['name']})"
+
+        return False, "Falha ao restaurar o plano de energia"
 
     # ------------------------------------------------------------------ #
     # AÇÃO: BOOST
@@ -638,11 +719,8 @@ class ZKBoostApp(ctk.CTk):
 
             # 3. Energia
             if self.var_power.get():
-                if self.set_power_plan("ultimate"):
-                    report.append("✔️ Plano de energia máximo ativado")
-                    self.log("✔️ Plano de energia máximo ativado.")
-                else:
-                    report.append("❌ Falha ao alterar o plano de energia")
+                ok, message = self.apply_power_plan()
+                report.append(("✔️ " if ok else "❌ ") + message)
 
             # 4. Rede
             if self.var_network.get():
@@ -709,11 +787,8 @@ class ZKBoostApp(ctk.CTk):
             report.extend(self._tune_process(restore=True))
 
             # 3. Energia
-            if self.set_power_plan("balanced"):
-                report.append("✔️ Plano de energia Equilibrado restaurado")
-                self.log("✔️ Plano de energia Equilibrado restaurado.")
-            else:
-                report.append("❌ Falha ao restaurar o plano de energia")
+            ok, message = self.restore_power_plan()
+            report.append(("✔️ " if ok else "❌ ") + message)
 
         except Exception as exc:
             self.log(f"❌ Erro inesperado: {exc}")
@@ -725,6 +800,27 @@ class ZKBoostApp(ctk.CTk):
     # ------------------------------------------------------------------ #
     # CPU (compartilhado entre boost e restore)
     # ------------------------------------------------------------------ #
+
+    def _affinity_target(self):
+        """Calcula quais processadores lógicos o CS2 deve usar.
+
+        Com SMT/Hyper-Threading ativo, o núcleo físico 0 é composto por DOIS
+        processadores lógicos (0 e 1). Remover apenas o 0 deixa o jogo rodando
+        no mesmo núcleo físico que se queria isolar — a otimização vira placebo.
+
+        Retorna (lista_alvo, lista_removida, smt_ativo).
+        """
+        logical = psutil.cpu_count(logical=True) or 1
+        physical = psutil.cpu_count(logical=False) or logical
+        smt = logical > physical
+
+        excluded = [0, 1] if smt and logical > 2 else [0]
+        target = [cpu for cpu in range(logical) if cpu not in excluded]
+
+        # Nunca deixar o jogo com menos de dois processadores lógicos.
+        if len(target) < 2:
+            return None, excluded, smt
+        return target, excluded, smt
 
     def _tune_process(self, restore=False):
         report = []
@@ -750,14 +846,18 @@ class ZKBoostApp(ctk.CTk):
                 return report
 
             if self.var_affinity.get():
-                cores = list(range(psutil.cpu_count() or 1))
-                if len(cores) > 1 and 0 in cores:
-                    cores.remove(0)
-                    process.cpu_affinity(cores)
-                    report.append("✔️ Core 0 isolado")
-                    self.log("✔️ Core 0 isolado.")
+                target, excluded, smt = self._affinity_target()
+                if target is None:
+                    report.append("⚠️ CPU com poucos núcleos — afinidade ignorada")
                 else:
-                    report.append("⚠️ CPU com um único núcleo — afinidade ignorada")
+                    process.cpu_affinity(target)
+                    label = (
+                        f"✔️ Core 0 isolado (CPUs {', '.join(map(str, excluded))} removidas)"
+                    )
+                    if smt:
+                        label += " — SMT detectado"
+                    report.append(label)
+                    self.log(label.replace("✔️ ", ""))
 
             if self.var_priority.get() and IS_WINDOWS:
                 process.nice(psutil.HIGH_PRIORITY_CLASS)
