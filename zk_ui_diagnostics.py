@@ -13,6 +13,8 @@ import threading
 
 import customtkinter as ctk
 
+import zk_actions as actions
+import zk_core as core
 import zk_diagnostics as diag
 import zk_theme as theme
 
@@ -38,6 +40,7 @@ class DiagnosticsPanel(ctk.CTkFrame):
         self.on_log = on_log or (lambda message: None)
         self.scanning = False
         self.findings = []
+        self.cards = {}
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -163,46 +166,111 @@ class DiagnosticsPanel(ctk.CTkFrame):
             diag.STATUS_OK: 2,
             diag.STATUS_INFO: 3,
         }
+        self.cards = {}
         for finding in sorted(findings, key=lambda f: order.get(f.status, 9)):
             self._render_card(finding)
 
     def _render_card(self, finding):
-        color, icon = STATUS_STYLE.get(finding.status, ("#8b949e", "?"))
-
+        """Desenha um card. Guarda a referência para poder reescrevê-lo
+        depois de uma correção, sem exigir novo scan completo."""
         card = ctk.CTkFrame(self.results, fg_color=COLOR_CARD, corner_radius=8)
         card.pack(fill="x", pady=4)
         card.grid_columnconfigure(1, weight=1)
+        self.cards[finding.key] = card
+        self._fill_card(card, finding)
+
+    def _fill_card(self, card, finding):
+        for child in card.winfo_children():
+            child.destroy()
+
+        color, icon = STATUS_STYLE.get(finding.status, (theme.TEXT_MUTED, "?"))
 
         ctk.CTkLabel(
             card, text=icon, text_color=color, width=22,
-            font=ctk.CTkFont(size=15, weight="bold"),
-        ).grid(row=0, column=0, sticky="nw", padx=(12, 0), pady=(10, 0))
+            font=theme.font(14, "bold"),
+        ).grid(row=0, column=0, sticky="nw", padx=(12, 0), pady=(12, 0))
 
         content = ctk.CTkFrame(card, fg_color="transparent")
-        content.grid(row=0, column=1, sticky="ew", padx=(4, 12), pady=(10, 10))
+        content.grid(row=0, column=1, sticky="ew", padx=(4, 12), pady=(12, 12))
         content.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            content, text=finding.label, anchor="w", justify="left",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        ).pack(fill="x")
+        ctk.CTkLabel(content, text=finding.label, anchor="w", justify="left",
+                     font=theme.font(12, "bold"), text_color=theme.TEXT
+                     ).pack(fill="x")
 
-        ctk.CTkLabel(
-            content, text=finding.value, anchor="w", justify="left",
-            text_color=color, font=ctk.CTkFont(size=12),
-            wraplength=600,
-        ).pack(fill="x")
+        ctk.CTkLabel(content, text=finding.value, anchor="w", justify="left",
+                     text_color=color, font=theme.font(12), wraplength=600
+                     ).pack(fill="x")
 
         if finding.detail:
-            ctk.CTkLabel(
-                content, text=finding.detail, anchor="w", justify="left",
-                text_color=COLOR_MUTED, font=ctk.CTkFont(size=11),
-                wraplength=600,
-            ).pack(fill="x", pady=(4, 0))
+            ctk.CTkLabel(content, text=finding.detail, anchor="w",
+                         justify="left", text_color=COLOR_MUTED,
+                         font=theme.font(11), wraplength=600
+                         ).pack(fill="x", pady=(4, 0))
 
         if finding.recommendation:
-            ctk.CTkLabel(
-                content, text="→ " + finding.recommendation,
-                anchor="w", justify="left", text_color="#d29922",
-                font=ctk.CTkFont(size=11), wraplength=600,
-            ).pack(fill="x", pady=(4, 0))
+            ctk.CTkLabel(content, text="→ " + finding.recommendation,
+                         anchor="w", justify="left", text_color=theme.SIGNAL,
+                         font=theme.font(11), wraplength=600
+                         ).pack(fill="x", pady=(4, 0))
+
+        # Botão de correção, quando existe uma. Cards verdes não recebem
+        # botão: oferecer "corrigir" no que está certo só confunde.
+        action = actions.for_finding(finding)
+        if action:
+            button = ctk.CTkButton(
+                card, text=action.label, width=130, height=30, corner_radius=6,
+                font=theme.font(11, "bold"), fg_color="transparent",
+                text_color=theme.SIGNAL, border_width=1,
+                border_color=theme.SIGNAL_DIM, hover_color=theme.RAISED,
+                command=lambda: self._run_action(finding, action),
+            )
+            button.grid(row=0, column=2, sticky="ne", padx=(0, 12), pady=12)
+
+    # ------------------------------------------------------------------ #
+    # CORREÇÕES
+    # ------------------------------------------------------------------ #
+
+    def _run_action(self, finding, action):
+        """Executa a correção em thread e reescreve apenas o card afetado."""
+        if action.needs_admin and not core.is_admin():
+            theme.show_warning(
+                self.winfo_toplevel(), "Requer Administrador",
+                "Esta correção altera uma configuração protegida do Windows. "
+                "Reinicie o ZK Boost como Administrador para aplicá-la.")
+            return
+
+        card = self.cards.get(finding.key)
+        if card is None:
+            return
+
+        for child in card.winfo_children():
+            if isinstance(child, ctk.CTkButton):
+                child.configure(state="disabled", text="Aplicando...")
+
+        threading.Thread(target=self._action_worker,
+                         args=(finding, action), daemon=True).start()
+
+    def _action_worker(self, finding, action):
+        result = action.run()
+        updated = None
+        if result.ok and action.recheck:
+            try:
+                updated = action.recheck()
+            except Exception:
+                updated = None
+        self.after(0, self._action_done, finding, result, updated)
+
+    def _action_done(self, finding, result, updated):
+        self.on_log(("OK  " if result.ok else "X   ") + result.message)
+
+        card = self.cards.get(finding.key)
+        if card is not None:
+            self._fill_card(card, updated or finding)
+
+        if result.ok and result.detail:
+            theme.show_success(self.winfo_toplevel(), result.message,
+                               result.detail)
+        elif not result.ok:
+            theme.show_warning(self.winfo_toplevel(), "Não foi possível aplicar",
+                               result.detail or result.message)
