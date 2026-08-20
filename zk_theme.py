@@ -182,3 +182,129 @@ def ghost_button(master, text, command, width=150, danger=False):
         border_width=1, border_color=DANGER if danger else HAIRLINE,
         hover_color=RAISED,
     )
+
+
+# --------------------------------------------------------------------------- #
+# DIÁLOGO MODAL
+# --------------------------------------------------------------------------- #
+
+_INTENT_STYLE = {
+    "info":    ("Informação", SIGNAL),
+    "warning": ("Atenção",    SIGNAL),
+    "confirm": ("Confirmar",  SIGNAL),
+    "error":   ("Erro",       DANGER),
+    "success": ("Concluído",  VERIFIED),
+}
+
+
+class Dialog(ctk.CTkToplevel):
+    """Caixa de diálogo modal com a identidade do ZK Boost.
+
+    Substitui tkinter.messagebox — a versão nativa quebra a coerência visual
+    do app com título de sistema, fonte diferente e fundo cinza.
+    """
+
+    def __init__(self, parent, title, message, intent="info",
+                 confirm_text="OK", cancel_text=None):
+        super().__init__(parent)
+
+        eyebrow, accent = _INTENT_STYLE.get(intent, _INTENT_STYLE["info"])
+
+        self.result = False
+        self.configure(fg_color=INK)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+
+        # Container principal
+        wrapper = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=10)
+        wrapper.pack(fill="both", expand=True, padx=1, pady=1)
+
+        body = ctk.CTkFrame(wrapper, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=26, pady=(22, 18))
+
+        ctk.CTkLabel(body, text=eyebrow.upper(), anchor="w",
+                     font=font(10, "bold"), text_color=accent
+                     ).pack(fill="x")
+
+        ctk.CTkLabel(body, text=title, anchor="w", justify="left",
+                     font=display(18), text_color=TEXT
+                     ).pack(fill="x", pady=(2, 10))
+
+        ctk.CTkLabel(body, text=message, anchor="w", justify="left",
+                     font=font(12), text_color=TEXT_MUTED, wraplength=440
+                     ).pack(fill="x")
+
+        # Rodapé com botões
+        footer = ctk.CTkFrame(wrapper, fg_color="transparent")
+        footer.pack(fill="x", padx=26, pady=(0, 20))
+
+        if cancel_text:
+            ghost_button(footer, cancel_text, self._on_cancel, width=110
+                         ).pack(side="right", padx=(8, 0))
+
+        primary_button(footer, confirm_text, self._on_confirm, width=110
+                       ).pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.bind("<Return>", lambda e: self._on_confirm())
+        self.bind("<Escape>", lambda e: self._on_cancel())
+
+        # Centraliza sobre a janela pai
+        self.update_idletasks()
+        self._center_over(parent)
+
+        # Modal: bloqueia interação com o pai até fechar
+        self.grab_set()
+        self.wait_visibility()
+        self.focus_force()
+
+    def _center_over(self, parent):
+        self.update_idletasks()
+        width = self.winfo_reqwidth()
+        height = self.winfo_reqheight()
+        try:
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            x = px + (pw - width) // 2
+            y = py + (ph - height) // 2
+        except Exception:
+            x = (self.winfo_screenwidth() - width) // 2
+            y = (self.winfo_screenheight() - height) // 2
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _on_confirm(self):
+        self.result = True
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = False
+        self.destroy()
+
+
+def show_info(parent, title, message):
+    dialog = Dialog(parent, title, message, intent="info", confirm_text="OK")
+    parent.wait_window(dialog)
+    return dialog.result
+
+
+def show_warning(parent, title, message):
+    dialog = Dialog(parent, title, message, intent="warning", confirm_text="OK")
+    parent.wait_window(dialog)
+    return dialog.result
+
+
+def show_success(parent, title, message):
+    dialog = Dialog(parent, title, message, intent="success", confirm_text="OK")
+    parent.wait_window(dialog)
+    return dialog.result
+
+
+def ask_confirm(parent, title, message,
+                confirm_text="Continuar", cancel_text="Cancelar"):
+    dialog = Dialog(parent, title, message, intent="confirm",
+                    confirm_text=confirm_text, cancel_text=cancel_text)
+    parent.wait_window(dialog)
+    return dialog.result

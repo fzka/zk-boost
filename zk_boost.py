@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-ZK Boost — Otimizador para Jogos
+ZK Boost — Otimizador para Counter-Strike 2
 --------------------------------------------
 Interface. Toda a lógica de sistema vive em zk_core.py.
 
@@ -11,7 +11,7 @@ Build:
 
 import os
 import threading
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 import customtkinter as ctk
 import psutil
@@ -23,6 +23,102 @@ from zk_ui_diagnostics import DiagnosticsPanel
 ctk.set_appearance_mode("dark")
 
 APP_VERSION = core.APP_VERSION
+
+
+class ResultDialog(ctk.CTkToplevel):
+    """Relatório de uma operação: uma linha por Result, com ícone colorido.
+
+    Segue o mesmo padrão visual dos cards do diagnóstico — status como cor
+    de fato importa, texto corrido de OK/X era ilegível em execução real.
+    """
+
+    def __init__(self, parent, title, results):
+        super().__init__(parent)
+        self.configure(fg_color=t.INK)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+
+        wrapper = ctk.CTkFrame(self, fg_color=t.SURFACE, corner_radius=10)
+        wrapper.pack(fill="both", expand=True, padx=1, pady=1)
+
+        # Cabeçalho
+        header = ctk.CTkFrame(wrapper, fg_color="transparent")
+        header.pack(fill="x", padx=26, pady=(22, 6))
+
+        ok_count = sum(1 for r in results if r.ok)
+        eyebrow = f"{ok_count} de {len(results)} concluídos"
+        accent = t.VERIFIED if ok_count == len(results) else t.SIGNAL
+
+        ctk.CTkLabel(header, text=eyebrow.upper(), anchor="w",
+                     font=t.font(10, "bold"), text_color=accent
+                     ).pack(fill="x")
+
+        ctk.CTkLabel(header, text=title, anchor="w",
+                     font=t.display(18), text_color=t.TEXT
+                     ).pack(fill="x", pady=(2, 0))
+
+        # Lista de resultados
+        list_box = ctk.CTkFrame(wrapper, fg_color="transparent")
+        list_box.pack(fill="both", expand=True, padx=26, pady=(14, 4))
+
+        for result in results:
+            self._render_row(list_box, result)
+
+        # Rodapé
+        footer = ctk.CTkFrame(wrapper, fg_color="transparent")
+        footer.pack(fill="x", padx=26, pady=(10, 20))
+        t.primary_button(footer, "Fechar", self.destroy, width=110
+                         ).pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Return>", lambda e: self.destroy())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self.update_idletasks()
+        self._center_over(parent)
+        self.grab_set()
+        self.focus_force()
+
+    def _render_row(self, parent, result):
+        if result.ok:
+            color, glyph = t.VERIFIED, "✓"
+        elif result.needs_admin:
+            color, glyph = t.SIGNAL, "!"
+        else:
+            color, glyph = t.DANGER, "×"
+
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=6)
+
+        ctk.CTkLabel(row, text=glyph, width=22, anchor="n",
+                     font=t.font(14, "bold"), text_color=color
+                     ).pack(side="left", padx=(0, 10))
+
+        text = ctk.CTkFrame(row, fg_color="transparent")
+        text.pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(text, text=result.message, anchor="w", justify="left",
+                     font=t.font(12, "bold"), text_color=t.TEXT,
+                     wraplength=420).pack(fill="x")
+
+        if result.detail:
+            ctk.CTkLabel(text, text=result.detail, anchor="w", justify="left",
+                         font=t.font(11), text_color=t.TEXT_MUTED,
+                         wraplength=420).pack(fill="x", pady=(1, 0))
+
+    def _center_over(self, parent):
+        width = self.winfo_reqwidth()
+        height = self.winfo_reqheight()
+        try:
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+            x = px + (pw - width) // 2
+            y = py + (ph - height) // 2
+        except Exception:
+            x = (self.winfo_screenwidth() - width) // 2
+            y = (self.winfo_screenheight() - height) // 2
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
 
 
 class ZKBoostApp(ctk.CTk):
@@ -506,23 +602,21 @@ class ZKBoostApp(ctk.CTk):
 
     def _report(self, title, results):
         self._set_busy(False)
-        lines = []
-        for result in results:
-            mark = "OK  " if result.ok else ("!   " if result.needs_admin else "X   ")
-            lines.append(mark + result.message)
-            if result.detail:
-                lines.append("      " + result.detail)
-        messagebox.showinfo(title, "\n".join(lines) if lines else "Nada a fazer.")
+        if not results:
+            t.show_info(self, title, "Nada a fazer.")
+            return
+
+        dialog = ResultDialog(self, title, results)
+        self.wait_window(dialog)
 
     def restart_elevated(self):
         self.save_state()
         if core.relaunch_as_admin():
             self.destroy()
         else:
-            messagebox.showwarning(
-                "Elevação recusada",
-                "Feche o ZK Boost e abra novamente com o botão direito → "
-                "'Executar como administrador'.")
+            t.show_warning(self, "Elevação recusada",
+                           "Feche o ZK Boost e abra novamente com o botão "
+                           "direito → 'Executar como administrador'.")
 
     def choose_cs2_path(self):
         folder = filedialog.askdirectory(
@@ -541,10 +635,9 @@ class ZKBoostApp(ctk.CTk):
         if self.busy:
             return
         if (self.var_tracers.get() or self.var_subtick.get()) and not self.cs2_cfg_path:
-            messagebox.showwarning(
-                "Pasta do CS2 não definida",
-                "Defina a pasta de configuração do jogo em Configurações "
-                "para aplicar as otimizações de CFG.")
+            t.show_warning(self, "Pasta do CS2 não definida",
+                           "Defina a pasta de configuração do jogo em "
+                           "Configurações para aplicar as otimizações de CFG.")
             return
 
         self.save_state()
@@ -586,14 +679,15 @@ class ZKBoostApp(ctk.CTk):
         if not any(var.get() for var in (self.var_temp, self.var_prefetch,
                                          self.var_wupdate, self.var_thumbs,
                                          self.var_dns)):
-            messagebox.showinfo("Limpeza", "Selecione ao menos um item.")
+            t.show_info(self, "Limpeza", "Selecione ao menos um item para limpar.")
             return
 
-        if not messagebox.askyesno(
-                "Confirmar limpeza",
-                "Os arquivos selecionados serão apagados permanentemente.\n"
-                "Feche outros programas para liberar arquivos em uso.\n\n"
-                "Deseja continuar?"):
+        if not t.ask_confirm(
+                self, "Confirmar limpeza",
+                "Os arquivos selecionados serão apagados permanentemente. "
+                "Feche outros programas para que mais arquivos em uso "
+                "possam ser liberados.",
+                confirm_text="Limpar", cancel_text="Cancelar"):
             return
 
         self.save_state()
@@ -628,10 +722,10 @@ class ZKBoostApp(ctk.CTk):
     def restore_all(self):
         if self.busy:
             return
-        if not messagebox.askyesno(
-                "Restaurar padrões",
-                "Todas as otimizações aplicadas serão desfeitas.\n\n"
-                "Deseja continuar?"):
+        if not t.ask_confirm(
+                self, "Restaurar padrões",
+                "Todas as otimizações aplicadas pelo ZK Boost serão desfeitas.",
+                confirm_text="Restaurar", cancel_text="Cancelar"):
             return
 
         self._set_busy(True)
