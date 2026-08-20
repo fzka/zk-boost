@@ -51,7 +51,8 @@ jobs:
             '--hidden-import', 'zk_core',
             '--hidden-import', 'zk_theme',
             '--hidden-import', 'zk_ui_diagnostics',
-            '--hidden-import', 'zk_actions'
+            '--hidden-import', 'zk_actions',
+            '--hidden-import', 'zk_cfg'
           )
           if (Test-Path 'assets/icon.ico') {
             $pyArgs += @('--icon', 'assets/icon.ico')

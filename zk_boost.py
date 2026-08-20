@@ -16,6 +16,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 import psutil
 
+import zk_cfg as gamecfg
 import zk_core as core
 import zk_theme as t
 from zk_ui_diagnostics import DiagnosticsPanel
@@ -162,8 +163,12 @@ class ZKBoostApp(ctk.CTk):
         self.var_priority = flag("priority")
         self.var_power = flag("power", False)
         self.var_gamedvr = flag("gamedvr", False)
-        self.var_tracers = flag("tracers")
-        self.var_subtick = flag("subtick")
+        # As opções de CFG vêm do catálogo, então adicionar um comando novo
+        # em zk_cfg.py já o faz aparecer na interface e ser persistido.
+        self.cfg_vars = {
+            cvar.key: flag(f"cfg_{cvar.key}", cvar.default)
+            for cvar in gamecfg.CATALOG
+        }
 
         self.var_temp = flag("clean_temp", True)
         self.var_prefetch = flag("clean_prefetch", False)
@@ -183,7 +188,6 @@ class ZKBoostApp(ctk.CTk):
         return {
             "affinity": self.var_affinity, "priority": self.var_priority,
             "power": self.var_power, "gamedvr": self.var_gamedvr,
-            "tracers": self.var_tracers, "subtick": self.var_subtick,
             "clean_temp": self.var_temp, "clean_prefetch": self.var_prefetch,
             "clean_wupdate": self.var_wupdate, "clean_thumbs": self.var_thumbs,
             "clean_dns": self.var_dns,
@@ -191,6 +195,8 @@ class ZKBoostApp(ctk.CTk):
 
     def save_state(self):
         data = {key: var.get() for key, var in self._state_map().items()}
+        for key, var in self.cfg_vars.items():
+            data[f"cfg_{key}"] = var.get()
         data["cs2_cfg_path"] = self.cs2_cfg_path or ""
         data["previous_power_guid"] = self.previous_power_guid or ""
         core.save_settings(data)
@@ -228,6 +234,7 @@ class ZKBoostApp(ctk.CTk):
             ("painel", "Painel"),
             ("diagnostico", "Diagnóstico"),
             ("otimizacoes", "Otimizações"),
+            ("jogo", "Config do Jogo"),
             ("limpeza", "Limpeza"),
             ("restauracao", "Restauração"),
             ("config", "Configurações"),
@@ -291,6 +298,7 @@ class ZKBoostApp(ctk.CTk):
         self._page_painel()
         self._page_diagnostico()
         self._page_otimizacoes()
+        self._page_jogo()
         self._page_limpeza()
         self._page_restauracao()
         self._page_config()
@@ -388,7 +396,7 @@ class ZKBoostApp(ctk.CTk):
 
         self._group_label(scroll, "Sistema")
         sistema = t.Card(scroll)
-        sistema.pack(fill="x", pady=(0, 18))
+        sistema.pack(fill="x")
         sistema.add_option(
             "Isolar o núcleo 0",
             "Remove do jogo o núcleo que o Windows mais usa para interrupções. "
@@ -407,18 +415,6 @@ class ZKBoostApp(ctk.CTk):
             "O Game DVR grava continuamente usando CPU e o encoder da GPU.",
             self.var_gamedvr)
 
-        self._group_label(scroll, "Jogo")
-        jogo = t.Card(scroll)
-        jogo.pack(fill="x")
-        jogo.add_option(
-            "Remover rastros de tiro em 1ª pessoa",
-            "Menos partículas na tela ao atirar. Exige reabrir o CS2.",
-            self.var_tracers)
-        jogo.add_option(
-            "Suavização de sub-ticks",
-            "Ajusta o buffer de rede e a espera de baixa latência do cliente.",
-            self.var_subtick)
-
         actions = ctk.CTkFrame(page, fg_color="transparent")
         actions.grid(row=2, column=0, sticky="ew", pady=(14, 0))
         actions.grid_columnconfigure(0, weight=1)
@@ -427,8 +423,75 @@ class ZKBoostApp(ctk.CTk):
         button.grid(row=0, column=1)
         self.action_buttons.append(button)
 
-    # ---------------------------- LIMPEZA ----------------------------- #
+    # ------------------------- CONFIG DO JOGO ------------------------- #
 
+    def _page_jogo(self):
+        page = self._new_page()
+        self.pages["jogo"] = page
+
+        t.PageHeader(
+            page, "Config do Jogo",
+            "Comandos escritos em zk_boost.cfg. Seu autoexec não é alterado.",
+            eyebrow="Counter-Strike 2").grid(row=0, column=0, sticky="ew")
+
+        scroll = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        scroll.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+
+        # Uma seção por categoria do catálogo.
+        for category in gamecfg.CATEGORIES:
+            cvars = [c for c in gamecfg.CATALOG if c.category == category]
+            if not cvars:
+                continue
+
+            self._group_label(scroll, category)
+            card = t.Card(scroll)
+            card.pack(fill="x", pady=(0, 18))
+            for cvar in cvars:
+                description = cvar.description
+                if cvar.note:
+                    description += f"\n{cvar.note}"
+                card.add_option(cvar.label, description,
+                                self.cfg_vars[cvar.key])
+
+        # O que deixamos de fora, e por quê. Nenhum concorrente publica isso,
+        # e é o que sustenta a confiança no resto da lista.
+        self._group_label(scroll, "O que não fazemos")
+        myths = ctk.CTkFrame(scroll, fg_color=t.SURFACE, corner_radius=10)
+        myths.pack(fill="x")
+
+        intro = ("Comandos abaixo aparecem em guias populares, mas não têm "
+                 "efeito no CS2 atual. O ZK Boost não os escreve.")
+        ctk.CTkLabel(myths, text=intro, anchor="w", justify="left",
+                     font=t.font(11), text_color=t.TEXT_MUTED, wraplength=560
+                     ).pack(fill="x", padx=20, pady=(16, 10))
+
+        for name, reason in gamecfg.MYTHS:
+            row = ctk.CTkFrame(myths, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=(0, 8))
+            ctk.CTkLabel(row, text=name, anchor="w", font=t.mono(11),
+                         text_color=t.TEXT_FAINT).pack(fill="x")
+            ctk.CTkLabel(row, text=reason, anchor="w", justify="left",
+                         font=t.font(11), text_color=t.TEXT_MUTED,
+                         wraplength=540).pack(fill="x")
+
+        ctk.CTkLabel(
+            myths,
+            text="O app também gera zk_check.cfg. Rode \"exec zk_check\" no "
+                 "console do jogo para conferir, a qualquer momento, quais "
+                 "comandos ainda existem nesta versão do CS2.",
+            anchor="w", justify="left", font=t.font(11),
+            text_color=t.TEXT_MUTED, wraplength=560
+        ).pack(fill="x", padx=20, pady=(6, 18))
+
+        actions = ctk.CTkFrame(page, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        actions.grid_columnconfigure(0, weight=1)
+        button = t.primary_button(actions, "Aplicar no jogo",
+                                  self.apply_all, width=200)
+        button.grid(row=0, column=1)
+        self.action_buttons.append(button)
+
+    # ---------------------------- LIMPEZA ----------------------------- #
     def _page_limpeza(self):
         page = self._new_page()
         self.pages["limpeza"] = page
@@ -634,7 +697,7 @@ class ZKBoostApp(ctk.CTk):
     def apply_all(self):
         if self.busy:
             return
-        if (self.var_tracers.get() or self.var_subtick.get()) and not self.cs2_cfg_path:
+        if any(var.get() for var in self.cfg_vars.values()) and not self.cs2_cfg_path:
             t.show_warning(self, "Pasta do CS2 não definida",
                            "Defina a pasta de configuração do jogo em "
                            "Configurações para aplicar as otimizações de CFG.")
@@ -650,9 +713,20 @@ class ZKBoostApp(ctk.CTk):
     def _worker_apply(self):
         results = []
 
-        if self.var_tracers.get() or self.var_subtick.get():
-            results.append(core.apply_game_config(
-                self.cs2_cfg_path, self.var_tracers.get(), self.var_subtick.get()))
+        selections = {key: var.get() for key, var in self.cfg_vars.items()}
+        if any(selections.values()) and self.cs2_cfg_path:
+            results.append(gamecfg.apply(self.cs2_cfg_path, selections))
+
+            # Um comando repetido no autoexec DEPOIS do nosso exec anula o
+            # nosso silenciosamente. É a causa mais comum de "apliquei e não
+            # mudou nada" — melhor avisar do que deixar o usuário no escuro.
+            for conflict in gamecfg.detect_conflicts(self.cs2_cfg_path, selections):
+                results.append(core.Result(
+                    False,
+                    f"Conflito em {conflict['cvar']}",
+                    f"Seu autoexec define {conflict['theirs']} depois da nossa "
+                    f"linha e anula o valor {conflict['ours']} "
+                    f"({conflict['label']}).", needs_admin=False))
 
         if self.var_affinity.get() or self.var_priority.get():
             results.extend(core.tune_process(
@@ -738,7 +812,9 @@ class ZKBoostApp(ctk.CTk):
         results = []
 
         if self.cs2_cfg_path:
-            results.append(core.apply_game_config(self.cs2_cfg_path, restore=True))
+            selections = {cvar.key: True for cvar in gamecfg.CATALOG}
+            results.append(gamecfg.apply(self.cs2_cfg_path, selections,
+                                         restore=True))
 
         results.extend(core.tune_process(restore=True))
         results.append(core.restore_power_plan(self.previous_power_guid))
