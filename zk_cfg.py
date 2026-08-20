@@ -63,14 +63,6 @@ CATALOG = [
         off_lines=['r_drawtracers_firstperson "1"'],
         default=True,
     ),
-    Cvar(
-        "freezecam", "Desativar câmera de morte",
-        "Volta ao jogo imediatamente após morrer, sem a cena de quem matou.",
-        PERF,
-        on_lines=['cl_disablefreezecam "1"'],
-        off_lines=['cl_disablefreezecam "0"'],
-        default=True,
-    ),
 
     # ------------------------ DISTRAÇÕES VISUAIS ------------------------ #
     Cvar(
@@ -80,13 +72,6 @@ CATALOG = [
         on_lines=['gameinstructor_enable "0"', 'cl_autohelp "0"'],
         off_lines=['gameinstructor_enable "1"', 'cl_autohelp "1"'],
         default=True,
-    ),
-    Cvar(
-        "advertise", "Não anunciar partida para amigos",
-        "Evita que a Steam mostre e permita entrada na sua partida em curso.",
-        VISUAL,
-        on_lines=['cl_join_advertise "0"'],
-        off_lines=['cl_join_advertise "2"'],
     ),
 
     # -------------------------- REDE E LATÊNCIA ------------------------- #
@@ -100,37 +85,40 @@ CATALOG = [
         off_lines=['cl_net_buffer_ticks "0"',
                    'engine_low_latency_sleep_after_client_tick "true"'],
         default=True,
-        note="Alguns jogadores relatam que o CS2 redefine o segundo comando "
-             "entre sessões. A CFG reaplica a cada início.",
+        note="A espera de baixa latência só tem efeito com r_low_latency "
+             "ativo, definido nas configurações de vídeo do jogo.",
     ),
     Cvar(
         "rate", "Taxa de banda máxima",
-        "Libera o teto de dados que o cliente aceita receber do servidor. "
-        "Só ajuda em conexão de banda larga estável.",
+        "Eleva ao máximo permitido pelo jogo (1000000) o volume de dados que "
+        "o cliente aceita receber. Só ajuda em banda larga estável.",
         NET,
-        on_lines=['rate "786432"'],
-        off_lines=['rate "196608"'],
+        on_lines=['rate "1000000"'],
+        off_lines=['rate "786432"'],
     ),
 
     # ------------------------------ ÁUDIO ------------------------------- #
     Cvar(
-        "audio_latency", "Reduzir atraso de áudio",
-        "Diminui o buffer de mixagem. Passos e tiros chegam antes, com risco "
-        "de estalos em placa de som mais fraca.",
+        "audio_stability", "Estabilizar áudio",
+        "Aumenta levemente o buffer de mixagem. Use apenas se você ouvir "
+        "estalos ou cortes no som durante a partida.",
         AUDIO,
         on_lines=['snd_mixahead "0.025"'],
-        off_lines=['snd_mixahead "0.05"'],
-        note="Se o áudio estalar, desative esta opção.",
+        off_lines=['snd_mixahead "0.001"'],
+        note="O CS2 já vem com o menor buffer possível (0.001). Esta opção "
+             "TROCA latência por estabilidade — só ative se houver estalo.",
     ),
 
     # --------------------------- TELEMETRIA ----------------------------- #
     Cvar(
-        "showfps", "Mostrar FPS e frametime",
-        "Contador no canto da tela. Útil para comparar antes e depois de uma "
+        "showfps", "Mostrar contador de FPS",
+        "Medidor no topo da tela. Útil para comparar antes e depois de uma "
         "otimização.",
         HUD,
         on_lines=['cl_showfps "1"'],
         off_lines=['cl_showfps "0"'],
+        note="O jogo aceita 2 para leitura suavizada e 3 para tempo de "
+             "resposta do servidor."
     ),
     Cvar(
         "console", "Manter console habilitado",
@@ -167,6 +155,11 @@ MYTHS = [
      "nas configurações do jogo."),
     ("cl_forcepreload",
      "Removido do CS2. Não faz nada."),
+    ("cl_disablefreezecam",
+     "Removido. Verificado com 'exec zk_check' no console: o jogo responde "
+     "que o comando não existe."),
+    ("cl_join_advertise",
+     "Removido. Verificado da mesma forma."),
     ("-d3d9ex / -tickrate nas opções de inicialização",
      "Parâmetros de Source 1. O CS2 usa Vulkan/DirectX 11 e tickrate de "
      "servidor."),

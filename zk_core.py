@@ -22,7 +22,7 @@ import psutil
 import zk_diagnostics as diag
 
 IS_WINDOWS = os.name == "nt"
-APP_VERSION = "3.0"
+APP_VERSION = "3.0.1"
 
 MARKER_START = "// >>> ZK BOOST START"
 MARKER_END = "// <<< ZK BOOST END"
@@ -194,34 +194,3 @@ def detect_cs2_cfg_path():
             if os.path.isdir(candidate):
                 return candidate
     return None
-
-
-# --------------------------------------------------------------------------- #
-# CFG DO JOGO
-# --------------------------------------------------------------------------- #
-
-def build_cfg_lines(tracers=True, subtick=True, restore=False) -> list:
-    lines = [
-        "// ================================",
-        f"// ZK BOOST AUTO-CFG v{APP_VERSION}",
-        "// Arquivo gerado automaticamente.",
-        "// ================================",
-    ]
-    if restore:
-        return lines + [
-            'r_drawtracers_firstperson "1"',
-            'cl_net_buffer_ticks "0"',
-            'engine_low_latency_sleep_after_client_tick "true"',
-            'echo "ZK BOOST: valores padrao restaurados"',
-        ]
-
-    lines.append('r_drawtracers_firstperson "0"' if tracers
-                 else 'r_drawtracers_firstperson "1"')
-    if subtick:
-        lines += [
-            'cl_net_buffer_ticks "0"',
-            'engine_low_latency_sleep_after_client_tick "true"',
-        ]
-    # Prova visual no console do jogo de que a integração carregou.
-    lines.append('echo "ZK BOOST carregado"')
-    return lines
