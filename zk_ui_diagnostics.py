@@ -14,18 +14,19 @@ import threading
 import customtkinter as ctk
 
 import zk_diagnostics as diag
+import zk_theme as theme
 
 # Paleta por status. O cinza do INFO é proposital: só o que exige atenção
 # recebe cor, senão a tela vira um mural de alertas e nada se destaca.
 STATUS_STYLE = {
-    diag.STATUS_OK: ("#3fb950", "✔"),
-    diag.STATUS_WARN: ("#d29922", "!"),
-    diag.STATUS_INFO: ("#8b949e", "i"),
-    diag.STATUS_ERROR: ("#f85149", "×"),
+    diag.STATUS_OK: (theme.VERIFIED, "OK"),
+    diag.STATUS_WARN: (theme.SIGNAL, "!"),
+    diag.STATUS_INFO: (theme.TEXT_MUTED, "·"),
+    diag.STATUS_ERROR: (theme.DANGER, "X"),
 }
 
-COLOR_CARD = "#212121"
-COLOR_MUTED = "#9a9a9a"
+COLOR_CARD = theme.SURFACE
+COLOR_MUTED = theme.TEXT_MUTED
 
 
 class DiagnosticsPanel(ctk.CTkFrame):
@@ -65,12 +66,14 @@ class DiagnosticsPanel(ctk.CTkFrame):
         self.summary_label.grid(row=0, column=0, sticky="w")
 
         self.scan_button = ctk.CTkButton(
-            header, text="Analisar PC", width=120, height=32, corner_radius=6,
-            font=ctk.CTkFont(size=12, weight="bold"), command=self.start_scan,
+            header, text="Analisar PC", width=130, height=34, corner_radius=8,
+            font=theme.font(12, "bold"), command=self.start_scan,
+            fg_color=theme.SIGNAL, hover_color=theme.SIGNAL_HOVER,
+            text_color=theme.INK,
         )
         self.scan_button.grid(row=0, column=1, sticky="e", padx=(10, 0))
 
-        self.progress = ctk.CTkProgressBar(header, height=4)
+        self.progress = ctk.CTkProgressBar(header, height=4, progress_color=theme.SIGNAL)
         self.progress.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.progress.set(0)
 
@@ -84,7 +87,7 @@ class DiagnosticsPanel(ctk.CTkFrame):
                 "pela internet."
             ),
             font=ctk.CTkFont(size=12), text_color=COLOR_MUTED,
-            wraplength=380, justify="left",
+            wraplength=620, justify="left",
         ).pack(anchor="w", pady=20)
 
     # ------------------------------------------------------------------ #
@@ -125,8 +128,8 @@ class DiagnosticsPanel(ctk.CTkFrame):
         self.progress.set(0)
         self.summary_label.configure(text="A análise falhou.")
         ctk.CTkLabel(
-            self.results, text=message, text_color="#f85149",
-            font=ctk.CTkFont(size=12), wraplength=380, justify="left",
+            self.results, text=message, text_color=theme.DANGER,
+            font=ctk.CTkFont(size=12), wraplength=620, justify="left",
         ).pack(anchor="w", pady=10)
 
     # ------------------------------------------------------------------ #
@@ -187,19 +190,19 @@ class DiagnosticsPanel(ctk.CTkFrame):
         ctk.CTkLabel(
             content, text=finding.value, anchor="w", justify="left",
             text_color=color, font=ctk.CTkFont(size=12),
-            wraplength=340,
+            wraplength=600,
         ).pack(fill="x")
 
         if finding.detail:
             ctk.CTkLabel(
                 content, text=finding.detail, anchor="w", justify="left",
                 text_color=COLOR_MUTED, font=ctk.CTkFont(size=11),
-                wraplength=340,
+                wraplength=600,
             ).pack(fill="x", pady=(4, 0))
 
         if finding.recommendation:
             ctk.CTkLabel(
                 content, text="→ " + finding.recommendation,
                 anchor="w", justify="left", text_color="#d29922",
-                font=ctk.CTkFont(size=11), wraplength=340,
+                font=ctk.CTkFont(size=11), wraplength=600,
             ).pack(fill="x", pady=(4, 0))

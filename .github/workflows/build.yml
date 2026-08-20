@@ -12,6 +12,11 @@ jobs:
   build:
     runs-on: windows-latest
 
+    # Necessário para o passo "Criar Release": por padrão o GITHUB_TOKEN
+    # tem apenas leitura, e publicar uma release exige escrita em contents.
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,7 +47,10 @@ jobs:
             '--name', 'ZK-Boost',
             '--version-file', 'version_info.txt',
             '--collect-all', 'customtkinter',
-            '--hidden-import', 'zk_diagnostics'
+            '--hidden-import', 'zk_diagnostics',
+            '--hidden-import', 'zk_core',
+            '--hidden-import', 'zk_theme',
+            '--hidden-import', 'zk_ui_diagnostics'
           )
           if (Test-Path 'assets/icon.ico') {
             $pyArgs += @('--icon', 'assets/icon.ico')

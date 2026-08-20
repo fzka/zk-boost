@@ -1,506 +1,499 @@
 # -*- coding: utf-8 -*-
 """
-ZK Boost - CS2 Optimizer (v2.0)
---------------------------------
-Otimizador VAC-Safe para Counter-Strike 2.
-
-Métodos utilizados (nenhum deles toca a memória do jogo):
-  - psutil  -> CPU Affinity / Priority Class do processo cs2.exe
-  - I/O     -> escrita não-destrutiva de arquivos .cfg
-  - powercfg / ipconfig / netsh -> comandos nativos do Windows
+ZK Boost — Otimizador para Jogos
+--------------------------------------------
+Interface. Toda a lógica de sistema vive em zk_core.py.
 
 Build:
-    pyinstaller --noconfirm --onefile --windowed --name "ZK Boost" zk_boost.py
+    pyinstaller --noconfirm --onedir --windowed --uac-admin --name "ZK-Boost" \
+        --version-file version_info.txt --collect-all customtkinter zk_boost.py
 """
 
-import ctypes
-import json
 import os
-import shutil
-import subprocess
-import sys
 import threading
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 import psutil
 
-import zk_diagnostics as diag
+import zk_core as core
+import zk_theme as t
 from zk_ui_diagnostics import DiagnosticsPanel
 
-# --------------------------------------------------------------------------- #
-# CONSTANTES
-# --------------------------------------------------------------------------- #
-
-IS_WINDOWS = os.name == "nt"
-APP_VERSION = "2.0"
-
-# ATENÇÃO: os GUIDs de plano de energia NÃO são iguais entre máquinas.
-# Planos duplicados pela BIOS, por utilitários do fabricante ou por
-# `powercfg -duplicatescheme` recebem GUID próprio — hardcodar o GUID do
-# "Alto Desempenho" faz o recurso falhar silenciosamente em boa parte dos PCs.
-# Os planos são descobertos em runtime via zk_diagnostics.list_power_plans().
-#
-# Único GUID estável em todas as instalações: o Equilibrado padrão do Windows,
-# usado apenas como último recurso na restauração.
-GUID_BALANCED = "381b4222-f694-41f0-9685-ff5bb260df2e"
-
-MARKER_START = "// >>> ZK BOOST START"
-MARKER_END = "// <<< ZK BOOST END"
-EXEC_LINE = "exec zk_boost"
-
-CS2_CFG_RELATIVE = os.path.join(
-    "steamapps", "common", "Counter-Strike Global Offensive", "game", "csgo", "cfg"
-)
-
-COLOR_BG_CARD = "#212121"
-COLOR_ACCENT = "#00a8ff"
-COLOR_DANGER = "#8b3a3a"
-COLOR_DANGER_HOVER = "#a94545"
-COLOR_BANNER = "#3d3320"
-
-
-# --------------------------------------------------------------------------- #
-# HELPERS DE SISTEMA
-# --------------------------------------------------------------------------- #
-
-def get_config_dir() -> str:
-    """Guarda as settings no %APPDATA% (o .exe pode estar em pasta read-only)."""
-    base = os.getenv("APPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, "ZKBoost")
-    try:
-        os.makedirs(path, exist_ok=True)
-        return path
-    except OSError:
-        return os.path.dirname(os.path.abspath(sys.argv[0]))
-
-
-CONFIG_FILE = os.path.join(get_config_dir(), "zk_settings.json")
-
-
-def is_admin() -> bool:
-    try:
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
-
-
-def relaunch_as_admin() -> bool:
-    """Reabre o próprio app pedindo elevação via UAC.
-
-    Funciona tanto rodando do código-fonte (python zk_boost.py) quanto
-    empacotado pelo PyInstaller. Retorna True se o Windows aceitou iniciar o
-    novo processo — o chamador deve então encerrar a instância atual.
-    """
-    if not IS_WINDOWS:
-        return False
-    try:
-        if getattr(sys, "frozen", False):
-            executable = sys.executable
-            params = ""
-        else:
-            executable = sys.executable
-            params = f'"{os.path.abspath(sys.argv[0])}"'
-
-        # Códigos <= 32 indicam falha, incluindo o usuário recusando o UAC.
-        result = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", executable, params, None, 1
-        )
-        return int(result) > 32
-    except Exception:
-        return False
-
-
-def run_hidden(command: str, timeout: int = 60):
-    """Executa um comando do Windows sem piscar janela de console."""
-    if not IS_WINDOWS:
-        return False, "Recurso disponível apenas no Windows."
-    try:
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            errors="ignore",
-            timeout=timeout,
-            startupinfo=startupinfo,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        output = (result.stdout or result.stderr or "").strip()
-        return result.returncode == 0, output
-    except subprocess.TimeoutExpired:
-        return False, "Tempo limite excedido."
-    except OSError as exc:
-        return False, str(exc)
-
-
-def find_cs2_process():
-    """Retorna o psutil.Process do cs2.exe ou None."""
-    try:
-        for proc in psutil.process_iter(["name", "pid"]):
-            try:
-                if (proc.info.get("name") or "").lower() == "cs2.exe":
-                    return psutil.Process(proc.info["pid"])
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-    except Exception:
-        pass
-    return None
-
-
-def _steam_roots() -> list:
-    """Descobre instalações da Steam via registro + caminhos comuns."""
-    roots = []
-    if IS_WINDOWS:
-        try:
-            import winreg
-
-            candidates = [
-                (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
-            ]
-            for hive, key_path, value_name in candidates:
-                try:
-                    with winreg.OpenKey(hive, key_path) as key:
-                        value, _ = winreg.QueryValueEx(key, value_name)
-                        if value:
-                            roots.append(os.path.normpath(value))
-                except OSError:
-                    continue
-        except ImportError:
-            pass
-
-    roots.extend([
-        r"C:\Program Files (x86)\Steam",
-        r"C:\Program Files\Steam",
-        r"C:\Steam",
-        r"D:\Steam",
-        r"D:\SteamLibrary",
-        r"E:\SteamLibrary",
-    ])
-    return roots
-
-
-def _library_folders(steam_root: str) -> list:
-    """Lê o libraryfolders.vdf para achar bibliotecas em outros discos."""
-    libraries = [steam_root]
-    vdf_path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
-    try:
-        with open(vdf_path, "r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                if '"path"' in line:
-                    parts = line.split('"')
-                    if len(parts) >= 4:
-                        libraries.append(os.path.normpath(parts[3].replace("\\\\", "\\")))
-    except OSError:
-        pass
-    return libraries
-
-
-def detect_cs2_cfg_path():
-    """Tenta localizar automaticamente a pasta .../game/csgo/cfg."""
-    seen = set()
-    for root in _steam_roots():
-        for library in _library_folders(root):
-            if library in seen:
-                continue
-            seen.add(library)
-            candidate = os.path.join(library, CS2_CFG_RELATIVE)
-            if os.path.isdir(candidate):
-                return candidate
-    return None
-
-
-# --------------------------------------------------------------------------- #
-# APLICAÇÃO
-# --------------------------------------------------------------------------- #
-
 ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+
+APP_VERSION = core.APP_VERSION
 
 
 class ZKBoostApp(ctk.CTk):
+
     def __init__(self):
         super().__init__()
 
-        self.title(f"ZK Boost v{APP_VERSION} - CS2 Optimizer")
-        self.geometry("540x820")
-        self.minsize(500, 680)
-        self.resizable(True, True)
+        self.title(f"ZK Boost {APP_VERSION}")
+        self.geometry("1060x680")
+        self.minsize(940, 620)
+        self.configure(fg_color=t.INK)
+
+        t.init_fonts(self)
 
         self.busy = False
-        self.is_admin = is_admin()
+        self.is_admin = core.is_admin()
+        self.pages = {}
+        self.nav_buttons = {}
+        self.action_buttons = []
 
-        # --- Variáveis de Sistema ---
-        self.var_affinity = ctk.BooleanVar(value=True)
-        self.var_priority = ctk.BooleanVar(value=True)
-        self.var_power = ctk.BooleanVar(value=False)
+        self._load_state()
+        self._build_layout()
+        self._build_pages()
+        self.show_page("painel")
 
-        # --- Variáveis de Manutenção ---
-        self.var_network = ctk.BooleanVar(value=False)
-        self.var_cleanup = ctk.BooleanVar(value=False)
-
-        # --- Variáveis de Jogo ---
-        self.var_tracers = ctk.BooleanVar(value=True)
-        self.var_subtick = ctk.BooleanVar(value=True)
-        self.var_terms = ctk.BooleanVar(value=False)
-
-        self.cs2_cfg_path = None
-        self.previous_power_guid = None
-        self.load_settings()
-
-        self.build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        self.log("ZK Boost pronto.")
-        if self.cs2_cfg_path:
-            self.log(f"Pasta CFG detectada: {self.cs2_cfg_path}")
-        else:
-            self.log("Pasta CFG do CS2 ainda não definida.")
-        if not self.is_admin:
-            self.log("Sem privilégios de Administrador — alguns ajustes serão ignorados.")
+        self._tick_monitor()
 
     # ------------------------------------------------------------------ #
-    # PERSISTÊNCIA
+    # ESTADO
     # ------------------------------------------------------------------ #
 
-    def load_settings(self):
-        data = {}
-        try:
-            if os.path.exists(CONFIG_FILE):
-                with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
-                    data = json.load(handle)
-        except (OSError, ValueError):
-            data = {}
+    def _load_state(self):
+        data = core.load_settings()
 
-        for key, var in self._settings_map().items():
-            if key in data and isinstance(data[key], bool):
-                var.set(data[key])
+        def flag(key, default=True):
+            value = data.get(key)
+            return ctk.BooleanVar(value=value if isinstance(value, bool) else default)
 
-        saved_path = data.get("cs2_cfg_path", "")
-        if saved_path and os.path.isdir(saved_path):
-            self.cs2_cfg_path = saved_path
-        else:
-            self.cs2_cfg_path = detect_cs2_cfg_path()
+        self.var_affinity = flag("affinity")
+        self.var_priority = flag("priority")
+        self.var_power = flag("power", False)
+        self.var_gamedvr = flag("gamedvr", False)
+        self.var_tracers = flag("tracers")
+        self.var_subtick = flag("subtick")
 
-        # Sobrevive ao fechamento do app: sem isso, quem desse boost e
-        # reiniciasse perderia a referência do plano de energia original.
+        self.var_temp = flag("clean_temp", True)
+        self.var_prefetch = flag("clean_prefetch", False)
+        self.var_wupdate = flag("clean_wupdate", False)
+        self.var_thumbs = flag("clean_thumbs", False)
+        self.var_dns = flag("clean_dns", False)
+
         self.previous_power_guid = data.get("previous_power_guid") or None
 
-    def _settings_map(self):
+        saved = data.get("cs2_cfg_path", "")
+        if saved and os.path.isdir(saved):
+            self.cs2_cfg_path = saved
+        else:
+            self.cs2_cfg_path = core.detect_cs2_cfg_path()
+
+    def _state_map(self):
         return {
-            "affinity": self.var_affinity,
-            "priority": self.var_priority,
-            "power": self.var_power,
-            "network": self.var_network,
-            "cleanup": self.var_cleanup,
-            "tracers": self.var_tracers,
-            "subtick": self.var_subtick,
+            "affinity": self.var_affinity, "priority": self.var_priority,
+            "power": self.var_power, "gamedvr": self.var_gamedvr,
+            "tracers": self.var_tracers, "subtick": self.var_subtick,
+            "clean_temp": self.var_temp, "clean_prefetch": self.var_prefetch,
+            "clean_wupdate": self.var_wupdate, "clean_thumbs": self.var_thumbs,
+            "clean_dns": self.var_dns,
         }
 
-    def save_settings(self):
-        data = {key: var.get() for key, var in self._settings_map().items()}
+    def save_state(self):
+        data = {key: var.get() for key, var in self._state_map().items()}
         data["cs2_cfg_path"] = self.cs2_cfg_path or ""
         data["previous_power_guid"] = self.previous_power_guid or ""
-        try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2)
-        except OSError as exc:
-            self.log(f"Não foi possível salvar as preferências ({exc}).")
+        core.save_settings(data)
 
     def on_close(self):
-        self.save_settings()
+        self.save_state()
         self.destroy()
 
     # ------------------------------------------------------------------ #
-    # INTERFACE
+    # ESTRUTURA
     # ------------------------------------------------------------------ #
 
-    def build_ui(self):
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+    def _build_layout(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        # ---------- Cabeçalho ----------
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", pady=(15, 5))
-        ctk.CTkLabel(
-            header, text="⚡ ZK BOOST",
-            font=ctk.CTkFont(family="Segoe UI", size=28, weight="bold"),
-        ).pack()
-        ctk.CTkLabel(
-            header, text="Maximum Performance for CS2 · 100% VAC-Safe",
-            text_color="gray", font=ctk.CTkFont(size=12),
-        ).pack()
+        # --- Barra lateral ---
+        sidebar = ctk.CTkFrame(self, fg_color=t.SURFACE, corner_radius=0, width=212)
+        sidebar.grid(row=0, column=0, sticky="nsw")
+        sidebar.grid_propagate(False)
+        sidebar.grid_rowconfigure(1, weight=1)
+        sidebar.grid_columnconfigure(0, weight=1)
+
+        brand = ctk.CTkFrame(sidebar, fg_color="transparent")
+        brand.grid(row=0, column=0, sticky="ew", padx=20, pady=(24, 18))
+        ctk.CTkLabel(brand, text="ZK BOOST", anchor="w", font=t.display(20),
+                     text_color=t.TEXT).pack(fill="x")
+        ctk.CTkLabel(brand, text=f"versão {APP_VERSION}", anchor="w",
+                     font=t.font(10), text_color=t.TEXT_FAINT).pack(fill="x")
+
+        nav = ctk.CTkFrame(sidebar, fg_color="transparent")
+        nav.grid(row=1, column=0, sticky="new", padx=12)
+
+        for key, label in (
+            ("painel", "Painel"),
+            ("diagnostico", "Diagnóstico"),
+            ("otimizacoes", "Otimizações"),
+            ("limpeza", "Limpeza"),
+            ("restauracao", "Restauração"),
+            ("config", "Configurações"),
+        ):
+            button = ctk.CTkButton(
+                nav, text=label, anchor="w", height=38, corner_radius=8,
+                font=t.font(13), fg_color="transparent", text_color=t.TEXT_MUTED,
+                hover_color=t.RAISED, command=lambda k=key: self.show_page(k),
+            )
+            button.pack(fill="x", pady=2)
+            self.nav_buttons[key] = button
+
+        # --- Assinatura: leitura ao vivo do sistema ---
+        # Um app que se apresenta como medidor honesto deve estar sempre
+        # medindo algo à vista do usuário.
+        monitor = ctk.CTkFrame(sidebar, fg_color=t.RAISED, corner_radius=8)
+        monitor.grid(row=2, column=0, sticky="ew", padx=12, pady=16)
+
+        ctk.CTkLabel(monitor, text="AGORA", anchor="w", font=t.font(9, "bold"),
+                     text_color=t.TEXT_FAINT).pack(fill="x", padx=12, pady=(10, 3))
+        self.monitor_cpu = ctk.CTkLabel(monitor, text="CPU   --%", anchor="w",
+                                        font=t.mono(11), text_color=t.TEXT_MUTED)
+        self.monitor_cpu.pack(fill="x", padx=12)
+        self.monitor_ram = ctk.CTkLabel(monitor, text="RAM   --%", anchor="w",
+                                        font=t.mono(11), text_color=t.TEXT_MUTED)
+        self.monitor_ram.pack(fill="x", padx=12)
+        self.monitor_cs2 = ctk.CTkLabel(monitor, text="CS2   fechado", anchor="w",
+                                        font=t.mono(11), text_color=t.TEXT_FAINT)
+        self.monitor_cs2.pack(fill="x", padx=12, pady=(0, 10))
+
+        # --- Área de conteúdo ---
+        self.content = ctk.CTkFrame(self, fg_color="transparent")
+        self.content.grid(row=0, column=1, sticky="nsew", padx=24, pady=20)
+        self.content.grid_columnconfigure(0, weight=1)
+        self.content.grid_rowconfigure(0, weight=1)
+
+    def _new_page(self):
+        page = ctk.CTkFrame(self.content, fg_color="transparent")
+        page.grid(row=0, column=0, sticky="nsew")
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
+        return page
+
+    def show_page(self, key):
+        for name, button in self.nav_buttons.items():
+            active = name == key
+            button.configure(
+                fg_color=t.RAISED if active else "transparent",
+                text_color=t.SIGNAL if active else t.TEXT_MUTED,
+                font=t.font(13, "bold" if active else "normal"),
+            )
+        page = self.pages.get(key)
+        if page is not None:
+            page.tkraise()
+
+    # ------------------------------------------------------------------ #
+    # PÁGINAS
+    # ------------------------------------------------------------------ #
+
+    def _build_pages(self):
+        self._page_painel()
+        self._page_diagnostico()
+        self._page_otimizacoes()
+        self._page_limpeza()
+        self._page_restauracao()
+        self._page_config()
+
+    # ---------------------------- PAINEL ------------------------------ #
+
+    def _page_painel(self):
+        page = self._new_page()
+        self.pages["painel"] = page
+
+        t.PageHeader(page, "Painel", "Pronto para otimizar.",
+                     eyebrow="Visão geral").grid(row=0, column=0, sticky="ew")
+
+        body = ctk.CTkFrame(page, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(1, weight=1)
 
         if not self.is_admin:
-            self._build_admin_banner(header)
+            banner = ctk.CTkFrame(body, fg_color=t.SURFACE, corner_radius=10,
+                                  border_width=1, border_color=t.SIGNAL_DIM)
+            banner.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+            banner.grid_columnconfigure(0, weight=1)
 
-        # ---------- Abas ----------
-        # Diagnóstico vem primeiro de propósito: o app mostra que entende a
-        # máquina do usuário antes de pedir permissão para alterá-la.
-        self.tabs = ctk.CTkTabview(self, fg_color=COLOR_BG_CARD, corner_radius=8)
-        self.tabs.grid(row=1, column=0, sticky="nsew", padx=25, pady=5)
+            texto = ctk.CTkFrame(banner, fg_color="transparent")
+            texto.grid(row=0, column=0, sticky="ew", padx=18, pady=14)
+            ctk.CTkLabel(texto, text="Sem privilégios de Administrador",
+                         anchor="w", font=t.font(13, "bold"),
+                         text_color=t.SIGNAL).pack(fill="x")
+            ctk.CTkLabel(texto,
+                         text="Ajustes de CPU, energia e limpeza do sistema "
+                              "serão ignorados.",
+                         anchor="w", font=t.font(11),
+                         text_color=t.TEXT_MUTED).pack(fill="x")
+            t.ghost_button(banner, "Reiniciar elevado", self.restart_elevated,
+                           width=160).grid(row=0, column=1, padx=(0, 18))
 
-        tab_diag = self.tabs.add("Diagnóstico")
-        tab_opts = self.tabs.add("Otimizações")
-        self.tabs.set("Diagnóstico")
+        console_card = ctk.CTkFrame(body, fg_color=t.SURFACE, corner_radius=10)
+        console_card.grid(row=1, column=0, sticky="nsew")
+        console_card.grid_columnconfigure(0, weight=1)
+        console_card.grid_rowconfigure(1, weight=1)
 
-        # --- Aba 1: Diagnóstico ---
-        tab_diag.grid_columnconfigure(0, weight=1)
-        tab_diag.grid_rowconfigure(0, weight=1)
-        self.diagnostics_panel = DiagnosticsPanel(tab_diag, on_log=self.log)
-        self.diagnostics_panel.grid(row=0, column=0, sticky="nsew")
+        ctk.CTkLabel(console_card, text="REGISTRO", anchor="w",
+                     font=t.font(10, "bold"), text_color=t.TEXT_FAINT
+                     ).grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
 
-        # --- Aba 2: Otimizações ---
-        body = ctk.CTkScrollableFrame(tab_opts, fg_color="transparent")
-        body.pack(fill="both", expand=True)
-
-        # Sistema
-        self._section_title(body, "⚙️ Otimizações de Sistema")
-        frame_sys = self._card(body)
-        self._switch(frame_sys, "Desabilitar uso do Core 0 (Afinidade)", self.var_affinity)
-        self._switch(frame_sys, "Forçar Alta Prioridade de Processamento", self.var_priority)
-        self._switch(frame_sys, "Ativar Plano de Energia Máxima", self.var_power)
-
-        # Jogo
-        self._section_title(body, "🎮 Otimizações de Jogo (CFG Integrada)")
-        frame_game = self._card(body)
-        self._switch(frame_game, "Desabilitar Rastros de Tiro (1ª Pessoa)", self.var_tracers)
-        self._switch(frame_game, "Suavização Avançada de Sub-Ticks", self.var_subtick)
-
-        # Manutenção — separada das otimizações porque NÃO afeta desempenho
-        # em jogo. Misturar as duas coisas sugere um ganho que não existe.
-        self._section_title(body, "🧹 Manutenção do Windows")
-        ctk.CTkLabel(
-            body, text="Higiene do sistema. Não influencia o FPS.",
-            font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
-        ).pack(fill="x", pady=(0, 4))
-        frame_maint = self._card(body)
-        self._switch(frame_maint, "Limpar Cache DNS", self.var_network)
-        self._switch(frame_maint, "Limpar Arquivos Temporários", self.var_cleanup)
-
-        # Console de log
-        self._section_title(body, "📋 Console")
         self.log_box = ctk.CTkTextbox(
-            body, height=120, fg_color="#1a1a1a", corner_radius=8,
-            font=ctk.CTkFont(family="Consolas", size=11), state="disabled", wrap="word",
+            console_card, fg_color=t.INK, corner_radius=8, font=t.mono(11),
+            state="disabled", wrap="word", text_color=t.TEXT_MUTED,
         )
-        self.log_box.pack(fill="both", expand=True, pady=(0, 5))
+        self.log_box.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
 
-        # ---------- Rodapé ----------
-        footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=2, column=0, sticky="ew", padx=25, pady=(0, 15))
-        footer.grid_columnconfigure((0, 1), weight=1)
+        actions = ctk.CTkFrame(page, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        actions.grid_columnconfigure(0, weight=1)
+        button = t.primary_button(actions, "Otimizar agora", self.apply_all,
+                                  width=200)
+        button.grid(row=0, column=1)
+        self.action_buttons.append(button)
 
-        terms = ctk.CTkFrame(footer, fg_color="transparent")
-        terms.grid(row=0, column=0, columnspan=2, pady=(5, 8))
-        ctk.CTkCheckBox(
-            terms, text="Aceito os", variable=self.var_terms,
-            checkbox_width=18, checkbox_height=18, font=ctk.CTkFont(size=12),
-        ).pack(side="left", padx=(0, 5))
-        ctk.CTkButton(
-            terms, text="Termos de Segurança", width=0, height=0,
-            fg_color="transparent", text_color=COLOR_ACCENT, hover_color=COLOR_BG_CARD,
-            font=ctk.CTkFont(size=12, underline=True), command=self.show_terms,
-        ).pack(side="left")
-
-        self.btn_boost = ctk.CTkButton(
-            footer, text="APLICAR BOOST", height=45, corner_radius=8,
-            font=ctk.CTkFont(size=15, weight="bold"), command=self.apply_optimizations,
-        )
-        self.btn_boost.grid(row=1, column=0, sticky="ew", padx=(0, 5))
-
-        self.btn_restore = ctk.CTkButton(
-            footer, text="RESTAURAR PADRÕES", height=45, corner_radius=8,
-            fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER,
-            font=ctk.CTkFont(size=15, weight="bold"), command=self.restore_defaults,
-        )
-        self.btn_restore.grid(row=1, column=1, sticky="ew", padx=(5, 0))
-
-    def _build_admin_banner(self, parent):
-        """Aviso fixo quando o app roda sem elevação.
-
-        Sem isso, os ajustes que exigem Administrador falham e o usuário lê
-        apenas um ❌ no relatório, sem saber que a causa é permissão.
-        """
-        banner = ctk.CTkFrame(parent, fg_color=COLOR_BANNER, corner_radius=8)
-        banner.pack(fill="x", padx=25, pady=(12, 0))
-
-        ctk.CTkLabel(
-            banner, text="⚠  Executando sem privilégios de Administrador",
-            font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffd166",
-        ).pack(anchor="w", padx=12, pady=(10, 2))
-
-        ctk.CTkLabel(
-            banner,
-            text="Ajustes de CPU, energia e rede serão ignorados.",
-            font=ctk.CTkFont(size=11), text_color="#d9c9a3",
-            justify="left", anchor="w",
-        ).pack(anchor="w", padx=12, pady=(0, 8))
-
-        ctk.CTkButton(
-            banner, text="Reiniciar como Administrador", height=30,
-            font=ctk.CTkFont(size=12), corner_radius=6,
-            fg_color="#8a6d2f", hover_color="#a3823b",
-            command=self.restart_elevated,
-        ).pack(fill="x", padx=12, pady=(0, 10))
-
-    def restart_elevated(self):
-        """Fecha esta instância e reabre com elevação."""
-        self.save_settings()
-        if relaunch_as_admin():
-            self.destroy()
+        self.log("ZK Boost pronto.")
+        if self.cs2_cfg_path:
+            self.log(f"Pasta CFG: {self.cs2_cfg_path}")
         else:
-            messagebox.showwarning(
-                "Elevação recusada",
-                "Não foi possível reiniciar como Administrador.\n\n"
-                "Feche o ZK Boost e abra novamente clicando com o botão direito "
-                "no executável → 'Executar como administrador'.",
-            )
+            self.log("Pasta CFG do CS2 não localizada — defina em Configurações.")
+        if not self.is_admin:
+            self.log("Executando sem privilégios de Administrador.")
 
-    def _section_title(self, parent, text):
-        ctk.CTkLabel(
-            parent, text=text, anchor="w",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).pack(fill="x", pady=(10, 5))
+    # -------------------------- DIAGNÓSTICO --------------------------- #
 
-    def _card(self, parent):
-        frame = ctk.CTkFrame(parent, fg_color=COLOR_BG_CARD, corner_radius=8)
-        frame.pack(fill="x", pady=(0, 5))
-        return frame
+    def _page_diagnostico(self):
+        page = self._new_page()
+        self.pages["diagnostico"] = page
 
-    def _switch(self, parent, text, variable):
-        ctk.CTkSwitch(
-            parent, text=text, variable=variable, font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=15, pady=8)
+        t.PageHeader(page, "Diagnóstico",
+                     "Leitura do sistema. Nada é alterado nesta tela.",
+                     eyebrow="Análise").grid(row=0, column=0, sticky="ew")
 
-    def show_terms(self):
-        messagebox.showinfo(
-            "Segurança ZK Boost",
-            "O ZK Boost usa métodos 100% autorizados pela Valve.\n\n"
-            "• Nada é injetado na memória do jogo.\n"
-            "• Suas binds e mira originais nunca são apagadas.\n"
-            "• Todas as alterações podem ser desfeitas em RESTAURAR PADRÕES.\n\n"
-            "Alterações de CPU, energia e rede afetam o Windows e exigem "
-            "execução como Administrador.",
+        panel = DiagnosticsPanel(page, on_log=self.log)
+        panel.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+        self.diagnostics_panel = panel
+
+    # -------------------------- OTIMIZAÇÕES --------------------------- #
+
+    def _page_otimizacoes(self):
+        page = self._new_page()
+        self.pages["otimizacoes"] = page
+
+        t.PageHeader(page, "Otimizações",
+                     "Escolha o que aplicar. Tudo é reversível.",
+                     eyebrow="Desempenho").grid(row=0, column=0, sticky="ew")
+
+        scroll = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        scroll.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+
+        self._group_label(scroll, "Sistema")
+        sistema = t.Card(scroll)
+        sistema.pack(fill="x", pady=(0, 18))
+        sistema.add_option(
+            "Isolar o núcleo 0",
+            "Remove do jogo o núcleo que o Windows mais usa para interrupções. "
+            "Detecta SMT e remove o par correto.",
+            self.var_affinity)
+        sistema.add_option(
+            "Prioridade alta para o CS2",
+            "O Windows passa a atender o jogo antes dos demais processos.",
+            self.var_priority)
+        sistema.add_option(
+            "Plano de energia máximo",
+            "Impede que a CPU reduza a frequência durante a partida.",
+            self.var_power)
+        sistema.add_option(
+            "Desativar gravação em segundo plano",
+            "O Game DVR grava continuamente usando CPU e o encoder da GPU.",
+            self.var_gamedvr)
+
+        self._group_label(scroll, "Jogo")
+        jogo = t.Card(scroll)
+        jogo.pack(fill="x")
+        jogo.add_option(
+            "Remover rastros de tiro em 1ª pessoa",
+            "Menos partículas na tela ao atirar. Exige reabrir o CS2.",
+            self.var_tracers)
+        jogo.add_option(
+            "Suavização de sub-ticks",
+            "Ajusta o buffer de rede e a espera de baixa latência do cliente.",
+            self.var_subtick)
+
+        actions = ctk.CTkFrame(page, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        actions.grid_columnconfigure(0, weight=1)
+        button = t.primary_button(actions, "Aplicar otimizações",
+                                  self.apply_all, width=200)
+        button.grid(row=0, column=1)
+        self.action_buttons.append(button)
+
+    # ---------------------------- LIMPEZA ----------------------------- #
+
+    def _page_limpeza(self):
+        page = self._new_page()
+        self.pages["limpeza"] = page
+
+        t.PageHeader(
+            page, "Limpeza",
+            "Higiene do sistema. Libera espaço em disco, não aumenta FPS.",
+            eyebrow="Manutenção").grid(row=0, column=0, sticky="ew")
+
+        scroll = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        scroll.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+
+        card = t.Card(scroll)
+        card.pack(fill="x")
+        card.add_option(
+            "Arquivos temporários",
+            "Conteúdo da pasta %temp%. Arquivos em uso são preservados.",
+            self.var_temp)
+        card.add_option(
+            "Cache do Windows Update",
+            "Instaladores já aplicados. Costuma liberar bastante espaço.",
+            self.var_wupdate)
+        card.add_option(
+            "Cache de miniaturas",
+            "Miniaturas do Explorador de Arquivos. São recriadas com o uso.",
+            self.var_thumbs)
+        card.add_option(
+            "Arquivos Prefetch",
+            "O Windows usa estes arquivos para abrir programas mais rápido e "
+            "os recria sozinho. Limpar não melhora o desempenho.",
+            self.var_prefetch)
+        card.add_option(
+            "Cache DNS",
+            "Limpa a resolução de nomes guardada pelo sistema.",
+            self.var_dns)
+
+        actions = ctk.CTkFrame(page, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        actions.grid_columnconfigure(0, weight=1)
+        button = t.primary_button(actions, "Limpar selecionados",
+                                  self.run_cleanup, width=200)
+        button.grid(row=0, column=1)
+        self.action_buttons.append(button)
+
+    # -------------------------- RESTAURAÇÃO --------------------------- #
+
+    def _page_restauracao(self):
+        page = self._new_page()
+        self.pages["restauracao"] = page
+
+        t.PageHeader(page, "Restauração",
+                     "Desfaz as otimizações aplicadas pelo ZK Boost.",
+                     eyebrow="Reverter").grid(row=0, column=0, sticky="ew")
+
+        body = ctk.CTkFrame(page, fg_color=t.SURFACE, corner_radius=10)
+        body.grid(row=1, column=0, sticky="new", pady=(14, 0))
+        body.grid_columnconfigure(0, weight=1)
+
+        texto = (
+            "A restauração devolve o sistema ao estado anterior:\n\n"
+            "    O CS2 volta a usar todos os núcleos\n"
+            "    A prioridade do processo volta para Normal\n"
+            "    O plano de energia volta a ser o que você usava antes\n"
+            "    A gravação em segundo plano é reativada\n"
+            "    A CFG volta aos valores padrão do jogo\n\n"
+            "Arquivos apagados na Limpeza não são recuperados."
         )
+        ctk.CTkLabel(body, text=texto, anchor="w", justify="left",
+                     font=t.font(12), text_color=t.TEXT_MUTED
+                     ).grid(row=0, column=0, sticky="ew", padx=20, pady=20)
+
+        actions = ctk.CTkFrame(page, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        actions.grid_columnconfigure(0, weight=1)
+        button = t.ghost_button(actions, "Restaurar padrões", self.restore_all,
+                                width=200, danger=True)
+        button.grid(row=0, column=1)
+        self.action_buttons.append(button)
+
+    # ------------------------- CONFIGURAÇÕES -------------------------- #
+
+    def _page_config(self):
+        page = self._new_page()
+        self.pages["config"] = page
+
+        t.PageHeader(page, "Configurações", "Caminhos e informações do app.",
+                     eyebrow="Ajustes").grid(row=0, column=0, sticky="ew")
+
+        scroll = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        scroll.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+
+        self._group_label(scroll, "Counter-Strike 2")
+        card = ctk.CTkFrame(scroll, fg_color=t.SURFACE, corner_radius=10)
+        card.pack(fill="x", pady=(0, 18))
+        card.grid_columnconfigure(0, weight=1)
+
+        box = ctk.CTkFrame(card, fg_color="transparent")
+        box.grid(row=0, column=0, sticky="ew", padx=18, pady=14)
+        ctk.CTkLabel(box, text="Pasta de configuração", anchor="w",
+                     font=t.font(13, "bold"), text_color=t.TEXT).pack(fill="x")
+        self.path_label = ctk.CTkLabel(
+            box, text=self.cs2_cfg_path or "Não localizada", anchor="w",
+            justify="left", font=t.mono(10), text_color=t.TEXT_MUTED,
+            wraplength=520)
+        self.path_label.pack(fill="x", pady=(2, 0))
+
+        t.ghost_button(card, "Alterar", self.choose_cs2_path, width=110
+                       ).grid(row=0, column=1, padx=(0, 18))
+
+        self._group_label(scroll, "Sobre")
+        about = ctk.CTkFrame(scroll, fg_color=t.SURFACE, corner_radius=10)
+        about.pack(fill="x")
+        texto = (
+            f"ZK Boost {APP_VERSION} · código aberto sob licença MIT\n"
+            "github.com/fzka/zk-boost\n\n"
+            "Nada é injetado na memória do jogo. O app usa apenas a API oficial "
+            "do Windows, comandos nativos do sistema e escrita de arquivos .cfg — "
+            "o mesmo que qualquer configuração feita à mão.\n\n"
+            f"Privilégios: {'Administrador' if self.is_admin else 'usuário comum'}"
+        )
+        ctk.CTkLabel(about, text=texto, anchor="w", justify="left",
+                     font=t.font(11), text_color=t.TEXT_MUTED, wraplength=600
+                     ).pack(fill="x", padx=20, pady=18)
+
+    def _group_label(self, parent, text):
+        ctk.CTkLabel(parent, text=text.upper(), anchor="w",
+                     font=t.font(10, "bold"), text_color=t.TEXT_FAINT
+                     ).pack(fill="x", pady=(2, 6))
 
     # ------------------------------------------------------------------ #
-    # LOG / ESTADO
+    # MONITOR AO VIVO
+    # ------------------------------------------------------------------ #
+
+    def _tick_monitor(self):
+        try:
+            cpu = psutil.cpu_percent(None)
+            ram = psutil.virtual_memory().percent
+            self.monitor_cpu.configure(text=f"CPU  {cpu:5.0f}%")
+            self.monitor_ram.configure(text=f"RAM  {ram:5.0f}%")
+
+            if core.find_cs2_process():
+                self.monitor_cs2.configure(text="CS2  em execução",
+                                           text_color=t.VERIFIED)
+            else:
+                self.monitor_cs2.configure(text="CS2  fechado",
+                                           text_color=t.TEXT_FAINT)
+        except Exception:
+            pass
+        self.after(2000, self._tick_monitor)
+
+    # ------------------------------------------------------------------ #
+    # LOG E ESTADO
     # ------------------------------------------------------------------ #
 
     def log(self, message):
-        """Thread-safe: pode ser chamado de dentro das threads de trabalho."""
         self.after(0, self._append_log, message)
 
     def _append_log(self, message):
         try:
             self.log_box.configure(state="normal")
-            self.log_box.insert("end", f"› {message}\n")
+            self.log_box.insert("end", f"{message}\n")
             self.log_box.see("end")
             self.log_box.configure(state="disabled")
         except Exception:
@@ -508,462 +501,163 @@ class ZKBoostApp(ctk.CTk):
 
     def _set_busy(self, busy):
         self.busy = busy
-        state = "disabled" if busy else "normal"
-        self.btn_boost.configure(state=state)
-        self.btn_restore.configure(state=state)
+        for button in self.action_buttons:
+            button.configure(state="disabled" if busy else "normal")
 
-    def _finish(self, title, lines):
+    def _report(self, title, results):
         self._set_busy(False)
+        lines = []
+        for result in results:
+            mark = "OK  " if result.ok else ("!   " if result.needs_admin else "X   ")
+            lines.append(mark + result.message)
+            if result.detail:
+                lines.append("      " + result.detail)
         messagebox.showinfo(title, "\n".join(lines) if lines else "Nada a fazer.")
 
-    # ------------------------------------------------------------------ #
-    # CAMINHO DO CS2
-    # ------------------------------------------------------------------ #
+    def restart_elevated(self):
+        self.save_state()
+        if core.relaunch_as_admin():
+            self.destroy()
+        else:
+            messagebox.showwarning(
+                "Elevação recusada",
+                "Feche o ZK Boost e abra novamente com o botão direito → "
+                "'Executar como administrador'.")
 
-    def ensure_cs2_path(self) -> bool:
-        if self.cs2_cfg_path and os.path.isdir(self.cs2_cfg_path):
-            return True
-
-        detected = detect_cs2_cfg_path()
-        if detected:
-            self.cs2_cfg_path = detected
-            self.save_settings()
-            return True
-
-        messagebox.showinfo(
-            "Caminho não encontrado",
-            "Não encontramos a pasta do CS2.\nPor favor, selecione a pasta 'cfg' do jogo.",
-        )
-        folder = filedialog.askdirectory(title="Selecione a pasta .../game/csgo/cfg")
+    def choose_cs2_path(self):
+        folder = filedialog.askdirectory(
+            title="Selecione a pasta .../game/csgo/cfg")
         if folder and os.path.isdir(folder):
             self.cs2_cfg_path = os.path.normpath(folder)
-            self.save_settings()
-            return True
-        return False
+            self.path_label.configure(text=self.cs2_cfg_path)
+            self.save_state()
+            self.log(f"Pasta CFG definida: {self.cs2_cfg_path}")
 
     # ------------------------------------------------------------------ #
-    # MÓDULO: CFG DO JOGO
+    # AÇÕES
     # ------------------------------------------------------------------ #
 
-    def _build_cfg_lines(self, restore=False):
-        lines = [
-            "// ================================",
-            f"// ZK BOOST AUTO-CFG v{APP_VERSION}",
-            "// Arquivo gerado automaticamente.",
-            "// ================================",
+    def apply_all(self):
+        if self.busy:
+            return
+        if (self.var_tracers.get() or self.var_subtick.get()) and not self.cs2_cfg_path:
+            messagebox.showwarning(
+                "Pasta do CS2 não definida",
+                "Defina a pasta de configuração do jogo em Configurações "
+                "para aplicar as otimizações de CFG.")
+            return
+
+        self.save_state()
+        self._set_busy(True)
+        self.show_page("painel")
+        self.log("")
+        self.log("— aplicando otimizações —")
+        threading.Thread(target=self._worker_apply, daemon=True).start()
+
+    def _worker_apply(self):
+        results = []
+
+        if self.var_tracers.get() or self.var_subtick.get():
+            results.append(core.apply_game_config(
+                self.cs2_cfg_path, self.var_tracers.get(), self.var_subtick.get()))
+
+        if self.var_affinity.get() or self.var_priority.get():
+            results.extend(core.tune_process(
+                self.var_affinity.get(), self.var_priority.get()))
+
+        if self.var_power.get():
+            results.append(core.apply_power_plan(self._remember_power_guid))
+
+        if self.var_gamedvr.get():
+            results.append(core.set_game_dvr(False))
+
+        for result in results:
+            self.log(("OK  " if result.ok else "X   ") + result.message)
+
+        self.after(0, self._report, "Otimizações aplicadas", results)
+
+    def _remember_power_guid(self, guid):
+        self.previous_power_guid = guid
+        self.save_state()
+
+    def run_cleanup(self):
+        if self.busy:
+            return
+        if not any(var.get() for var in (self.var_temp, self.var_prefetch,
+                                         self.var_wupdate, self.var_thumbs,
+                                         self.var_dns)):
+            messagebox.showinfo("Limpeza", "Selecione ao menos um item.")
+            return
+
+        if not messagebox.askyesno(
+                "Confirmar limpeza",
+                "Os arquivos selecionados serão apagados permanentemente.\n"
+                "Feche outros programas para liberar arquivos em uso.\n\n"
+                "Deseja continuar?"):
+            return
+
+        self.save_state()
+        self._set_busy(True)
+        self.show_page("painel")
+        self.log("")
+        self.log("— limpando —")
+        threading.Thread(target=self._worker_cleanup, daemon=True).start()
+
+    def _worker_cleanup(self):
+        results = []
+        tasks = [
+            (self.var_temp, core.clean_temp),
+            (self.var_wupdate, core.clean_windows_update_cache),
+            (self.var_thumbs, core.clean_thumbnails),
+            (self.var_prefetch, core.clean_prefetch),
+            (self.var_dns, core.flush_dns),
         ]
-        if restore:
-            lines += [
-                'r_drawtracers_firstperson "1"',
-                'cl_net_buffer_ticks "0"',
-                'engine_low_latency_sleep_after_client_tick "true"',
-                "// Valores padrão restaurados pelo ZK Boost.",
-            ]
-            return lines
+        for var, function in tasks:
+            if not var.get():
+                continue
+            result = function()
+            results.append(result)
+            self.log(("OK  " if result.ok else "X   ") + result.message)
 
-        lines.append(
-            'r_drawtracers_firstperson "0"' if self.var_tracers.get()
-            else 'r_drawtracers_firstperson "1"'
-        )
-        if self.var_subtick.get():
-            lines += [
-                'cl_net_buffer_ticks "0"',
-                'engine_low_latency_sleep_after_client_tick "true"',
-            ]
-        return lines
+        total = sum(result.data.get("mb", 0) for result in results)
+        if total >= 1:
+            results.append(core.Result(True, f"Total liberado: {total:.0f} MB"))
 
-    def apply_game_config(self, restore=False) -> bool:
-        """Escreve zk_boost.cfg e registra o exec no autoexec.cfg sem apagar nada."""
-        try:
-            cfg_file = os.path.join(self.cs2_cfg_path, "zk_boost.cfg")
-            with open(cfg_file, "w", encoding="utf-8") as handle:
-                handle.write("\n".join(self._build_cfg_lines(restore)) + "\n")
-        except OSError as exc:
-            self.log(f"Falha ao escrever zk_boost.cfg: {exc}")
-            return False
+        self.after(0, self._report, "Limpeza concluída", results)
 
-        autoexec = os.path.join(self.cs2_cfg_path, "autoexec.cfg")
-        block = f"{MARKER_START}\n{EXEC_LINE}\n{MARKER_END}\n"
-        try:
-            content = ""
-            if os.path.exists(autoexec):
-                with open(autoexec, "r", encoding="utf-8", errors="ignore") as handle:
-                    content = handle.read()
-
-            if MARKER_START in content or EXEC_LINE in content:
-                return True  # já integrado, não duplica
-
-            with open(autoexec, "a" if content else "w", encoding="utf-8") as handle:
-                if content and not content.endswith("\n"):
-                    handle.write("\n")
-                handle.write(block)
-            return True
-        except OSError as exc:
-            self.log(f"Falha ao atualizar autoexec.cfg: {exc}")
-            return False
-
-    # ------------------------------------------------------------------ #
-    # MÓDULO: REDE
-    # ------------------------------------------------------------------ #
-
-    def optimize_network(self):
-        """Limpeza de cache DNS. É manutenção, não ganho de desempenho.
-
-        Deliberadamente NÃO fazemos `netsh winsock reset` nem `netsh int ip
-        reset` aqui: são comandos de REPARO de uma pilha de rede corrompida,
-        exigem reinício do PC e não melhoram nada em partida. Quem abre um
-        otimizador quer jogar em seguida, não reiniciar.
-
-        Também não aplicamos tweaks de TCP (Nagle, TcpAckFrequency): o CS2
-        trafega em UDP, então esses ajustes não tocam no jogo — são placebo
-        repetido por guias de otimização.
-        """
-        lines = []
-        ok, _ = run_hidden("ipconfig /flushdns")
-        prefix = "✔️ " if ok else "❌ "
-        lines.append(prefix + "Cache DNS limpo")
-        self.log(prefix + "Cache DNS limpo")
-        return lines
-
-    # ------------------------------------------------------------------ #
-    # MÓDULO: LIMPEZA DE TEMP
-    # ------------------------------------------------------------------ #
-
-    def clean_temp_files(self):
-        temp_dir = os.environ.get("TEMP") or os.environ.get("TMP")
-        if not temp_dir or not os.path.isdir(temp_dir):
-            self.log("❌ Pasta %temp% não encontrada.")
-            return None
-
-        temp_dir = os.path.normpath(temp_dir)
-        # Trava de segurança: nunca operar na raiz de um disco.
-        drive, tail = os.path.splitdrive(temp_dir)
-        if tail.strip("\\/") == "":
-            self.log("❌ Caminho de %temp% inseguro. Limpeza abortada.")
-            return None
-
-        freed, removed, skipped = 0, 0, 0
-        try:
-            entries = list(os.scandir(temp_dir))
-        except OSError as exc:
-            self.log(f"❌ Não foi possível ler %temp%: {exc}")
-            return None
-
-        for entry in entries:
-            try:
-                if entry.is_file() or entry.is_symlink():
-                    size = entry.stat().st_size
-                    os.remove(entry.path)
-                    freed += size
-                    removed += 1
-                elif entry.is_dir():
-                    size = self._folder_size(entry.path)
-                    shutil.rmtree(entry.path)
-                    freed += size
-                    removed += 1
-            except (OSError, PermissionError):
-                skipped += 1  # arquivo em uso: ignorar é o comportamento seguro
-
-        mb = freed / (1024 * 1024)
-        # Arquivos em uso sao pulados de proposito. Exibir esse numero como
-        # se fosse falha assusta sem motivo: e o comportamento correto.
-        if removed:
-            self.log(f"✔️ Temp: {removed} itens removidos ({mb:.1f} MB liberados).")
-        else:
-            self.log("✔️ Temp: nada a remover, a pasta ja estava limpa.")
-        return mb
-
-    @staticmethod
-    def _folder_size(path):
-        total = 0
-        for root, _, files in os.walk(path):
-            for name in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, name))
-                except OSError:
-                    continue
-        return total
-
-    # ------------------------------------------------------------------ #
-    # MÓDULO: ENERGIA
-    # ------------------------------------------------------------------ #
-
-    def _rank_power_plans(self):
-        """Lista os planos disponíveis ordenados por potencial de desempenho.
-
-        O critério é o estado mínimo do processador (PROCTHROTTLEMIN): quanto
-        maior, menos a CPU reduz frequência durante a partida. Isso evita
-        depender do nome do plano, que muda conforme o idioma do Windows.
-        """
-        plans = diag.list_power_plans()
-        ranked = []
-        for plan in plans:
-            state = diag.min_processor_state(plan["guid"])
-            ranked.append({**plan, "min_state": state if state is not None else -1})
-        ranked.sort(key=lambda item: item["min_state"], reverse=True)
-        return ranked
-
-    def apply_power_plan(self):
-        """Ativa o plano de maior desempenho disponível nesta máquina."""
-        ranked = self._rank_power_plans()
-        if not ranked:
-            self.log("❌ Não foi possível listar os planos de energia.")
-            return False, "Não foi possível listar os planos de energia"
-
-        active = next((p for p in ranked if p["active"]), None)
-        if active:
-            # Guarda o plano do usuário para que a restauração devolva
-            # exatamente o que ele tinha, e não um padrão genérico.
-            self.previous_power_guid = active["guid"]
-            self.save_settings()
-
-        best = ranked[0]
-        if active and best["guid"] == active["guid"]:
-            self.log(f"✔️ Plano de energia já ideal: {best['name']}.")
-            return True, f"Plano de energia já ideal ({best['name']})"
-
-        ok, _ = run_hidden(f"powercfg /setactive {best['guid']}")
-        if ok:
-            self.log(f"✔️ Plano de energia alterado para {best['name']}.")
-            return True, f"Plano de energia: {best['name']}"
-
-        self.log("❌ Falha ao alterar o plano de energia.")
-        return False, "Falha ao alterar o plano de energia"
-
-    def restore_power_plan(self):
-        """Devolve o plano que estava ativo antes do boost."""
-        plans = diag.list_power_plans()
-        if not plans:
-            return False, "Não foi possível listar os planos de energia"
-
-        available = {plan["guid"]: plan for plan in plans}
-        target = None
-
-        if self.previous_power_guid and self.previous_power_guid in available:
-            target = available[self.previous_power_guid]
-        elif GUID_BALANCED in available:
-            target = available[GUID_BALANCED]
-        else:
-            # Sem histórico e sem o Equilibrado padrão: usa o plano de menor
-            # estado mínimo de processador, que é o mais conservador presente.
-            ranked = self._rank_power_plans()
-            target = ranked[-1] if ranked else None
-
-        if not target:
-            return False, "Nenhum plano de energia adequado encontrado"
-
-        if target["active"]:
-            return True, f"Plano de energia já em {target['name']}"
-
-        ok, _ = run_hidden(f"powercfg /setactive {target['guid']}")
-        if ok:
-            self.previous_power_guid = None
-            self.save_settings()
-            self.log(f"✔️ Plano de energia restaurado para {target['name']}.")
-            return True, f"Plano de energia restaurado ({target['name']})"
-
-        return False, "Falha ao restaurar o plano de energia"
-
-    # ------------------------------------------------------------------ #
-    # AÇÃO: BOOST
-    # ------------------------------------------------------------------ #
-
-    def apply_optimizations(self):
+    def restore_all(self):
         if self.busy:
             return
-        if not self.var_terms.get():
-            messagebox.showwarning("Aviso", "Aceite os Termos de Segurança.")
-            return
-
-        if (self.var_tracers.get() or self.var_subtick.get()) and not self.ensure_cs2_path():
-            messagebox.showwarning("Aviso", "Pasta do CS2 não definida. CFG não aplicada.")
-            return
-
-        if self.var_cleanup.get():
-            confirm = messagebox.askyesno(
-                "Limpeza de Temporários",
-                "Arquivos da pasta %temp% serão apagados.\n"
-                "Feche programas abertos antes de continuar.\n\nDeseja prosseguir?",
-            )
-            if not confirm:
-                self.var_cleanup.set(False)
-
-        self.save_settings()
-        self._set_busy(True)
-        self.log("--- Iniciando BOOST ---")
-        threading.Thread(target=self._run_apply, daemon=True).start()
-
-    def _run_apply(self):
-        report = []
-        try:
-            # 1. CFG do jogo
-            if self.cs2_cfg_path and (self.var_tracers.get() or self.var_subtick.get()):
-                if self.apply_game_config(restore=False):
-                    report.append("✔️ CFG aplicada no jogo (binds preservados)")
-                    self.log("✔️ CFG aplicada com sucesso.")
-                else:
-                    report.append("❌ Falha ao aplicar a CFG")
-
-            # 2. CPU
-            report.extend(self._tune_process(restore=False))
-
-            # 3. Energia
-            if self.var_power.get():
-                ok, message = self.apply_power_plan()
-                report.append(("✔️ " if ok else "❌ ") + message)
-
-            # 4. Rede
-            if self.var_network.get():
-                report.extend(self.optimize_network())
-
-            # 5. Limpeza
-            if self.var_cleanup.get():
-                freed = self.clean_temp_files()
-                if freed is None:
-                    report.append("❌ Falha na limpeza de temporários")
-                elif freed < 1:
-                    report.append("✔️ Temporários já estavam limpos")
-                else:
-                    report.append(f"✔️ Temporários limpos ({freed:.0f} MB liberados)")
-
-        except Exception as exc:  # rede de segurança: a GUI nunca deve travar
-            self.log(f"❌ Erro inesperado: {exc}")
-            report.append(f"❌ Erro inesperado: {exc}")
-
-        self.log("--- BOOST finalizado ---")
-        self.after(0, self._finish, "ZK BOOST", ["Relatório de Otimização:", ""] + report)
-
-    # ------------------------------------------------------------------ #
-    # AÇÃO: RESTAURAR
-    # ------------------------------------------------------------------ #
-
-    def restore_defaults(self):
-        if self.busy:
-            return
-        confirm = messagebox.askyesno(
-            "Restaurar Padrões",
-            "Isto irá desfazer as otimizações:\n\n"
-            "• CS2 volta a usar todos os núcleos (incluindo o Core 0)\n"
-            "• Prioridade do processo volta para Normal\n"
-            "• CFG volta aos valores padrão (rastros habilitados)\n"
-            "• Plano de energia volta para Equilibrado\n\n"
-            "Deseja continuar?",
-        )
-        if not confirm:
+        if not messagebox.askyesno(
+                "Restaurar padrões",
+                "Todas as otimizações aplicadas serão desfeitas.\n\n"
+                "Deseja continuar?"):
             return
 
         self._set_busy(True)
-        self.log("--- Restaurando padrões ---")
-        threading.Thread(target=self._run_restore, daemon=True).start()
+        self.show_page("painel")
+        self.log("")
+        self.log("— restaurando padrões —")
+        threading.Thread(target=self._worker_restore, daemon=True).start()
 
-    def _run_restore(self):
-        report = []
-        try:
-            # 1. CFG padrão
-            if self.cs2_cfg_path and os.path.isdir(self.cs2_cfg_path):
-                if self.apply_game_config(restore=True):
-                    report.append("✔️ CFG restaurada (rastros habilitados)")
-                    report.append("ℹ️ Reinicie o CS2 para os valores padrão valerem")
-                    self.log("✔️ zk_boost.cfg reescrito com os valores padrão.")
-                else:
-                    report.append("❌ Falha ao restaurar a CFG")
-            else:
-                report.append("⚠️ Pasta do CS2 não definida — CFG não alterada")
+    def _worker_restore(self):
+        results = []
 
-            # 2. CPU
-            report.extend(self._tune_process(restore=True))
+        if self.cs2_cfg_path:
+            results.append(core.apply_game_config(self.cs2_cfg_path, restore=True))
 
-            # 3. Energia
-            ok, message = self.restore_power_plan()
-            report.append(("✔️ " if ok else "❌ ") + message)
+        results.extend(core.tune_process(restore=True))
+        results.append(core.restore_power_plan(self.previous_power_guid))
+        results.append(core.set_game_dvr(True))
 
-        except Exception as exc:
-            self.log(f"❌ Erro inesperado: {exc}")
-            report.append(f"❌ Erro inesperado: {exc}")
+        self.previous_power_guid = None
+        self.save_state()
 
-        self.log("--- Restauração finalizada ---")
-        self.after(0, self._finish, "ZK BOOST", ["Relatório de Restauração:", ""] + report)
+        for result in results:
+            self.log(("OK  " if result.ok else "X   ") + result.message)
 
-    # ------------------------------------------------------------------ #
-    # CPU (compartilhado entre boost e restore)
-    # ------------------------------------------------------------------ #
+        self.after(0, self._report, "Restauração concluída", results)
 
-    def _affinity_target(self):
-        """Calcula quais processadores lógicos o CS2 deve usar.
-
-        Com SMT/Hyper-Threading ativo, o núcleo físico 0 é composto por DOIS
-        processadores lógicos (0 e 1). Remover apenas o 0 deixa o jogo rodando
-        no mesmo núcleo físico que se queria isolar — a otimização vira placebo.
-
-        Retorna (lista_alvo, lista_removida, smt_ativo).
-        """
-        logical = psutil.cpu_count(logical=True) or 1
-        physical = psutil.cpu_count(logical=False) or logical
-        smt = logical > physical
-
-        excluded = [0, 1] if smt and logical > 2 else [0]
-        target = [cpu for cpu in range(logical) if cpu not in excluded]
-
-        # Nunca deixar o jogo com menos de dois processadores lógicos.
-        if len(target) < 2:
-            return None, excluded, smt
-        return target, excluded, smt
-
-    def _tune_process(self, restore=False):
-        report = []
-        wants_cpu = restore or self.var_affinity.get() or self.var_priority.get()
-        if not wants_cpu:
-            return report
-
-        process = find_cs2_process()
-        if process is None:
-            self.log("⚠️ cs2.exe não está em execução.")
-            report.append("⚠️ CS2 fechado — abra o jogo e aplique de novo para a CPU")
-            return report
-
-        try:
-            if restore:
-                process.cpu_affinity(list(range(psutil.cpu_count() or 1)))
-                report.append("✔️ Afinidade restaurada (todos os núcleos)")
-                self.log("✔️ Afinidade restaurada.")
-                if IS_WINDOWS:
-                    process.nice(psutil.NORMAL_PRIORITY_CLASS)
-                    report.append("✔️ Prioridade restaurada para Normal")
-                    self.log("✔️ Prioridade Normal restaurada.")
-                return report
-
-            if self.var_affinity.get():
-                target, excluded, smt = self._affinity_target()
-                if target is None:
-                    report.append("⚠️ CPU com poucos núcleos — afinidade ignorada")
-                else:
-                    process.cpu_affinity(target)
-                    label = (
-                        f"✔️ Core 0 isolado (CPUs {', '.join(map(str, excluded))} removidas)"
-                    )
-                    if smt:
-                        label += " — SMT detectado"
-                    report.append(label)
-                    self.log(label.replace("✔️ ", ""))
-
-            if self.var_priority.get() and IS_WINDOWS:
-                process.nice(psutil.HIGH_PRIORITY_CLASS)
-                report.append("✔️ Prioridade Alta aplicada")
-                self.log("✔️ Prioridade Alta aplicada.")
-
-        except psutil.AccessDenied:
-            self.log("❌ Acesso negado ao processo cs2.exe.")
-            report.append("❌ Acesso negado — execute o ZK Boost como Administrador")
-        except psutil.NoSuchProcess:
-            report.append("⚠️ O CS2 foi fechado durante a operação")
-        except (OSError, ValueError) as exc:
-            self.log(f"❌ Erro ao ajustar a CPU: {exc}")
-            report.append(f"❌ Erro ao ajustar a CPU: {exc}")
-
-        return report
-
-
-# --------------------------------------------------------------------------- #
 
 if __name__ == "__main__":
     app = ZKBoostApp()
